@@ -193,6 +193,52 @@ body .crisp-search-container .modal.crisp-search-panel input.crisp-search-input.
   white-space: nowrap;
 }
 
+.crisp-search-item-hits {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 1px;
+  height: 22px;
+  padding: 0 4px 0 7px;
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.crisp-search-item-hits:hover {
+  background: var(--crisp-search-hover);
+  color: var(--text-normal);
+}
+
+.crisp-search-item-hits-icon {
+  display: flex;
+}
+
+.crisp-search-item-hits-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.crisp-search-section.is-drill {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-normal);
+  cursor: default;
+}
+
+.crisp-search-section-back {
+  display: flex;
+  margin-left: -4px;
+  color: var(--text-muted);
+}
+
+.crisp-search-section-back svg {
+  width: 14px;
+  height: 14px;
+}
+
 .crisp-search-item-hotkey {
   display: flex;
   flex: none;

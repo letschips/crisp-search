@@ -75,6 +75,8 @@ export interface SearchResult {
   line?: number;
   excerpt?: Excerpt;
   terms?: string[];
+  // Matching lines in the body, up to MAX_HITS + 1; set on heading and content results.
+  hitCount?: number;
 }
 
 interface IndexedDoc {
@@ -179,22 +181,40 @@ function lineAt(text: string, offset: number): number {
   return (text.slice(0, offset).match(/\n/g) ?? []).length;
 }
 
-export function makeExcerpt(content: string, query: string, matchedTerms: string[] = []): Excerpt {
-  const parts = queryParts(query);
-  const { frontmatter, body } = splitFrontmatter(content);
-  const first = findRanges(body, parts, matchedTerms)[0];
-  if (!first) {
-    // Only a property matched: show that property line rather than unrelated body text.
-    const property = findRanges(frontmatter, parts, matchedTerms)[0];
-    if (property) {
-      const lineStart = frontmatter.lastIndexOf("\n", property[0] - 1) + 1;
-      const lineEnd = frontmatter.indexOf("\n", property[0]);
-      const text = frontmatter.slice(lineStart, lineEnd === -1 ? undefined : lineEnd).trim();
-      return { text, ranges: findRanges(text, parts, matchedTerms), line: lineAt(frontmatter, property[0]) };
+// A line answers a query word when it holds the word itself; a Chinese word may also be split into
+// bigrams that all sit on the line, and an English word may appear as the fuzzy term that matched.
+function lineHolds(line: string, part: string, matchedTerms: string[]): boolean {
+  const lower = part.toLowerCase();
+  if (line.includes(lower)) return true;
+  if (isCjk(part)) return tokenizeText(part).every((token) => line.includes(token));
+  return matchedTerms.some((term) => !isCjk(term) && line.includes(term));
+}
+
+// Offsets of the first match on each body line that answers every query word, in note order.
+function hitStarts(body: string, parts: string[], matchedTerms: string[], limit: number): number[] {
+  const starts: number[] = [];
+  let offset = 0;
+  for (const line of body.split("\n")) {
+    const lower = line.toLowerCase();
+    if (lower.trim() && parts.every((part) => lineHolds(lower, part, matchedTerms))) {
+      starts.push(offset + (findRanges(line, parts, matchedTerms)[0]?.[0] ?? 0));
+      if (starts.length >= limit) break;
     }
+    offset += line.length + 1;
   }
-  const at = first ? first[0] : 0;
-  const line = lineAt(content, frontmatter.length + at);
+  return starts;
+}
+
+function propertyExcerpt(frontmatter: string, parts: string[], matchedTerms: string[]): Excerpt | null {
+  const property = findRanges(frontmatter, parts, matchedTerms)[0];
+  if (!property) return null;
+  const lineStart = frontmatter.lastIndexOf("\n", property[0] - 1) + 1;
+  const lineEnd = frontmatter.indexOf("\n", property[0]);
+  const text = frontmatter.slice(lineStart, lineEnd === -1 ? undefined : lineEnd).trim();
+  return { text, ranges: findRanges(text, parts, matchedTerms), line: lineAt(frontmatter, property[0]) };
+}
+
+function excerptAt(body: string, at: number, line: number, parts: string[], matchedTerms: string[]): Excerpt {
   const start = Math.max(0, at - EXCERPT_BEFORE);
   // Start on a line boundary when one is close, so the excerpt does not open mid-sentence.
   const lineStart = body.lastIndexOf("\n", at - 1) + 1;
@@ -211,6 +231,44 @@ export function makeExcerpt(content: string, query: string, matchedTerms: string
   let text = cleanMarkdown(body.slice(from, at + EXCERPT_AFTER), needles);
   if (from > lineStart) text = "…" + text;
   return { text, ranges: findRanges(text, parts, matchedTerms), line };
+}
+
+export function makeExcerpt(content: string, query: string, matchedTerms: string[] = []): Excerpt {
+  const parts = queryParts(query);
+  const { frontmatter, body } = splitFrontmatter(content);
+  // Words scattered over several lines still found the note; then show where the first of them is.
+  const at = hitStarts(body, parts, matchedTerms, 1)[0] ?? findRanges(body, parts, matchedTerms)[0]?.[0];
+  if (at === undefined) {
+    // Only a property matched: show that property line rather than unrelated body text.
+    const property = propertyExcerpt(frontmatter, parts, matchedTerms);
+    if (property) return property;
+  }
+  const offset = at ?? 0;
+  return excerptAt(body, offset, lineAt(content, frontmatter.length + offset), parts, matchedTerms);
+}
+
+export const MAX_HITS = 50;
+
+// One excerpt per matching line, for the in-note hit list.
+export function makeExcerpts(content: string, query: string, matchedTerms: string[] = [], limit = MAX_HITS): Excerpt[] {
+  const parts = queryParts(query);
+  const { frontmatter, body } = splitFrontmatter(content);
+  const starts = hitStarts(body, parts, matchedTerms, limit);
+  if (starts.length === 0) {
+    if (findRanges(body, parts, matchedTerms).length > 0) return [makeExcerpt(content, query, matchedTerms)];
+    const property = propertyExcerpt(frontmatter, parts, matchedTerms);
+    return property ? [property] : [];
+  }
+  const excerpts: Excerpt[] = [];
+  // Count lines incrementally; recounting from the top for each hit is quadratic on long notes.
+  let line = lineAt(frontmatter, frontmatter.length);
+  let counted = 0;
+  for (const at of starts) {
+    line += lineAt(body.slice(counted, at), at - counted);
+    counted = at;
+    excerpts.push(excerptAt(body, at, line, parts, matchedTerms));
+  }
+  return excerpts;
 }
 
 export class SearchEngine {
@@ -258,6 +316,24 @@ export class SearchEngine {
     return this.docs.has(path);
   }
 
+  hits(path: string, query: string, matchedTerms: string[] = []): Excerpt[] {
+    const doc = this.docs.get(path);
+    return doc ? makeExcerpts(doc.content, this.bodyQuery(path, queryParts(query)), matchedTerms) : [];
+  }
+
+  private inTitle(path: string, part: string): boolean {
+    const keys = this.titleKeys.get(path);
+    const lower = part.toLowerCase();
+    return !!keys && (keys.text.includes(lower) || keys.pinyin.some((key) => key.startsWith(lower)));
+  }
+
+  // The words the body has to answer: those the name, aliases or folder already answer are dropped,
+  // unless that leaves nothing.
+  private bodyQuery(path: string, parts: string[]): string {
+    const body = parts.filter((part) => !this.inTitle(path, part));
+    return (body.length ? body : parts).join(" ");
+  }
+
   paths(): string[] {
     return [...this.docs.keys()];
   }
@@ -279,8 +355,7 @@ export class SearchEngine {
       const fields = new Set(Object.values(hit.match).flat());
       // A title hit needs every query word answered by the name, aliases or folder; otherwise the body
       // carries part of the match and the result must show where.
-      const keys = this.titleKeys.get(doc.path)!;
-      const inTitle = (part: string) => keys.text.includes(part) || keys.pinyin.some((key) => key.startsWith(part));
+      const inTitle = (part: string) => this.inTitle(doc.path, part);
       const kind: MatchKind =
         [...fields].every((f) => TITLE_FIELDS.has(f)) || lowerParts.every(inTitle)
           ? "title"
@@ -309,7 +384,10 @@ export class SearchEngine {
         continue;
       }
       const terms = result.terms ?? [];
-      result.excerpt = makeExcerpt(doc.content, query, terms);
+      const bodyQuery = this.bodyQuery(doc.path, parts);
+      result.excerpt = makeExcerpt(doc.content, bodyQuery, terms);
+      // Counted one past the cap, so the panel can tell "50" from "more than 50".
+      result.hitCount = Math.max(1, hitStarts(splitFrontmatter(doc.content).body, queryParts(bodyQuery), terms, MAX_HITS + 1).length);
       const heading =
         result.kind === "heading"
           ? doc.headings.find((h) => findRanges(h.text, parts, terms).length > 0)

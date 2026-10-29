@@ -1,6 +1,6 @@
 import { App, Command, Hotkey, Keymap, Modal, Notice, Platform, Scope, TFile, setIcon } from "obsidian";
 import { CommandIndex, CommandMatch, isCommandAvailable } from "./commands";
-import { SearchResult, highlightRanges, highlightSegments } from "./engine";
+import { Excerpt, MAX_HITS, SearchResult, highlightRanges, highlightSegments } from "./engine";
 import type CrispSearchPlugin from "./main";
 
 const RECENT_LIMIT = 8;
@@ -16,6 +16,8 @@ interface FileItem {
   section: string;
   file: TFile;
   result?: SearchResult;
+  // Set on rows of the in-note hit list: one matching line of the file.
+  hit?: Excerpt;
 }
 
 interface CommandItem {
@@ -69,7 +71,17 @@ function renderHighlighted(el: HTMLElement, text: string, ranges: [number, numbe
 }
 
 function itemKey(item: Item): string {
-  return item.type === "command" ? `command:${item.command.id}` : `file:${item.file.path}`;
+  if (item.type === "command") return `command:${item.command.id}`;
+  return item.hit ? `hit:${item.file.path}:${item.hit.line}` : `file:${item.file.path}`;
+}
+
+function hitLabel(count: number): string {
+  return count > MAX_HITS ? `${MAX_HITS}+` : String(count);
+}
+
+// A body result with more than one matching line can open its in-note hit list.
+function hasMoreHits(item: Item | undefined): item is FileItem {
+  return item?.type === "file" && !item.hit && (item.result?.hitCount ?? 0) > 1;
 }
 
 function renderKeys(el: HTMLElement, keys: string[]): void {
@@ -92,6 +104,8 @@ export class LauncherModal extends Modal {
   private escapeScope: Scope | null = null;
   private idPrefix = "";
   private refreshPending = false;
+  // The body result whose hit list is showing, and where the list was when it opened.
+  private drill: { item: FileItem; index: number; scrollTop: number } | null = null;
   private readonly fileActions: Action<FileItem>[];
   private readonly commandActions: Action<CommandItem>[];
   private primaryLabel: HTMLElement | null = null;
@@ -153,10 +167,16 @@ export class LauncherModal extends Modal {
     this.actionsEl = this.modalEl.createDiv("crisp-search-actions");
 
     // Chinese IME: while composing, the field holds raw pinyin and Enter only confirms the candidate.
+    // Typing always searches again, leaving a hit list.
     this.input.addEventListener("input", (evt) => {
-      if (!(evt as InputEvent).isComposing) this.update();
+      if ((evt as InputEvent).isComposing) return;
+      this.drill = null;
+      this.update();
     });
-    this.input.addEventListener("compositionend", () => this.update());
+    this.input.addEventListener("compositionend", () => {
+      this.drill = null;
+      this.update();
+    });
     this.input.addEventListener("keydown", (evt) => this.onKeyDown(evt));
     this.listEl.addEventListener("mousemove", (evt) => {
       // Chromium replays mousemove when rows re-render under a still pointer; only real movement selects.
@@ -168,8 +188,18 @@ export class LauncherModal extends Modal {
       if (index !== -1 && index !== this.selected) this.select(index, false);
     });
     this.listEl.addEventListener("click", (evt) => {
+      const target = evt.target instanceof HTMLElement ? evt.target : null;
+      if (target?.closest(".crisp-search-section.is-drill")) {
+        this.leaveHits();
+        return;
+      }
       const index = this.rowIndexOf(evt.target);
       if (index === -1) return;
+      if (target?.closest(".crisp-search-item-hits")) {
+        this.select(index, false);
+        this.enterHits();
+        return;
+      }
       this.select(index, false);
       this.activate(this.items[index], this.modeFor(evt));
     });
@@ -180,6 +210,7 @@ export class LauncherModal extends Modal {
     this.escapeScope.register([], "Escape", (evt) => {
       if (evt.isComposing) return false;
       if (this.actionsOpen) this.toggleActions(false);
+      else if (this.drill) this.leaveHits();
       else this.close();
       return false;
     });
@@ -257,6 +288,18 @@ export class LauncherModal extends Modal {
       }
       return;
     }
+    // → at the end of the field opens a body result's hit list; ← goes back from it.
+    const atEnd = this.input.selectionStart === this.input.value.length && this.input.selectionEnd === this.input.value.length;
+    if (evt.key === "ArrowRight" && atEnd && !evt.shiftKey && hasMoreHits(this.items[this.selected])) {
+      evt.preventDefault();
+      this.enterHits();
+      return;
+    }
+    if (evt.key === "ArrowLeft" && this.drill && !evt.shiftKey) {
+      evt.preventDefault();
+      this.leaveHits();
+      return;
+    }
     if (evt.key === "ArrowDown" || (evt.ctrlKey && evt.key === "n")) {
       evt.preventDefault();
       this.select(Math.min(this.selected + 1, this.items.length - 1));
@@ -281,10 +324,34 @@ export class LauncherModal extends Modal {
     const query = (commandMode ? raw.slice(1) : raw).trim();
     this.refreshPending = false;
     this.toggleActions(false);
-    if (commandMode) this.items = this.commandItems(query, Infinity);
+    if (this.drill) this.items = this.hitItems(this.drill.item, query);
+    else if (commandMode) this.items = this.commandItems(query, Infinity);
     else this.items = query ? this.searchItems(query) : this.recentItems();
     this.selected = 0;
     this.render(query, commandMode);
+  }
+
+  private hitItems(parent: FileItem, query: string): Item[] {
+    const hits = this.plugin.engine.hits(parent.file.path, query, parent.result?.terms ?? []);
+    return hits.map((hit) => ({ type: "file", section: parent.file.basename, file: parent.file, result: parent.result, hit }));
+  }
+
+  private enterHits(): void {
+    const item = this.items[this.selected];
+    if (!hasMoreHits(item)) return;
+    this.drill = { item, index: this.selected, scrollTop: this.listEl.scrollTop };
+    this.update();
+  }
+
+  private leaveHits(): void {
+    const drill = this.drill;
+    if (!drill) return;
+    this.drill = null;
+    this.update();
+    const index = this.items.findIndex((item) => itemKey(item) === itemKey(drill.item));
+    if (index === -1) return;
+    this.listEl.scrollTop = drill.scrollTop;
+    this.select(index);
   }
 
   private recentItems(): Item[] {
@@ -351,9 +418,20 @@ export class LauncherModal extends Modal {
     this.items.forEach((item, index) => {
       if (item.section !== section) {
         section = item.section;
-        this.listEl.createDiv({ cls: "crisp-search-section", text: section });
+        const header = this.listEl.createDiv({ cls: "crisp-search-section", text: section });
+        if (this.drill) {
+          header.addClass("is-drill");
+          setIcon(header.createSpan({ cls: "crisp-search-section-back", attr: { "aria-label": "返回" } }), "chevron-left");
+          header.prepend(header.lastChild!);
+        }
       }
-      this.rows.push(item.type === "file" ? this.renderFileRow(item, index, query) : this.renderCommandRow(item, index));
+      const row =
+        item.type === "command"
+          ? this.renderCommandRow(item, index)
+          : item.hit
+            ? this.renderHitRow(item, item.hit, index)
+            : this.renderFileRow(item, index, query);
+      this.rows.push(row);
     });
     this.select(0);
   }
@@ -389,6 +467,19 @@ export class LauncherModal extends Modal {
     const folders = file.parent && !file.parent.isRoot() ? file.parent.path.split("/").slice(-2).join("/") : "";
     const accessory = [file.extension === "md" ? "" : file.extension.toUpperCase(), folders].filter(Boolean).join(" · ");
     if (accessory) row.createDiv({ cls: "crisp-search-item-accessory", text: accessory, attr: { title: file.path } });
+    if (hasMoreHits(item)) {
+      const hits = row.createDiv({ cls: "crisp-search-item-hits", attr: { "aria-label": "查看全部命中" } });
+      hits.createSpan({ text: `${hitLabel(result!.hitCount!)} 处` });
+      setIcon(hits.createSpan("crisp-search-item-hits-icon"), "chevron-right");
+    }
+    return row;
+  }
+
+  private renderHitRow(item: FileItem, hit: Excerpt, index: number): HTMLElement {
+    const row = this.createRow(index, "text");
+    const title = row.createDiv("crisp-search-item-text").createSpan("crisp-search-item-title crisp-search-item-hit");
+    renderHighlighted(title, hit.text, hit.ranges);
+    row.createDiv({ cls: "crisp-search-item-accessory", text: `第 ${hit.line + 1} 行` });
     return row;
   }
 
@@ -423,7 +514,15 @@ export class LauncherModal extends Modal {
 
   private actionsFor(item: Item | undefined): Action[] {
     if (!item) return [];
-    return (item.type === "command" ? this.commandActions : this.fileActions) as Action[];
+    if (item.type === "command") return this.commandActions as Action[];
+    if (!hasMoreHits(item)) return this.fileActions as Action[];
+    const hits: Action<FileItem> = {
+      label: `查看全部 ${hitLabel(item.result!.hitCount!)} 处命中`,
+      icon: "list",
+      keys: ["→"],
+      run: () => this.enterHits(),
+    };
+    return [...this.fileActions, hits] as Action[];
   }
 
   private renderActions(): void {
@@ -476,7 +575,7 @@ export class LauncherModal extends Modal {
     this.close();
     const workspace = this.app.workspace;
     const leaf = mode === "split" ? workspace.getLeaf("split", "vertical") : workspace.getLeaf(mode === "tab" ? "tab" : false);
-    const line = item.result?.line;
+    const line = item.hit?.line ?? item.result?.line;
     await leaf.openFile(item.file, { active: true, eState: line !== undefined ? { line } : undefined });
   }
 

@@ -18,7 +18,7 @@ await esbuild.build({
   outfile: path.join(outDir, "engine.mjs"),
   logLevel: "error",
 });
-const { SearchEngine, tokenizeText, makeExcerpt, highlightSegments } = await import(pathToFileURL(path.join(outDir, "engine.mjs")).href);
+const { SearchEngine, tokenizeText, makeExcerpt, makeExcerpts, highlightSegments } = await import(pathToFileURL(path.join(outDir, "engine.mjs")).href);
 
 function doc(p, content = "", extra = {}) {
   const basename = p.split("/").pop().replace(/\.[^.]+$/, "");
@@ -200,4 +200,53 @@ test("a match inside a link target stays visible in the excerpt", () => {
 test("highlight segments never repeat text, even for overlapping ranges", () => {
   const segments = highlightSegments("切换行号", [[0, 2], [0, 2], [1, 3]]);
   assert.equal(segments.map((s) => s.text).join(""), "切换行号");
+});
+
+// Multi-hit preview: one excerpt per line that matches, in note order.
+const LONG = "---\ntags: [发布]\n---\n# 发布流程\n\n第一步准备。\n\n中间无关的段落。\n\n第二步发布 Release，再次发布。\n\n最后一行也提到发布。\n";
+
+test("every matching line gets its own excerpt with its line number", () => {
+  const hits = makeExcerpts(LONG, "发布");
+  assert.deepEqual(hits.map((h) => h.line), [3, 9, 11]);
+  for (const hit of hits) assert.ok(hit.ranges.length > 0 && hit.text.includes("发布"), hit.text);
+});
+
+test("the number of excerpts is capped", () => {
+  const content = Array.from({ length: 80 }, (_, i) => `第 ${i} 行提到发布`).join("\n");
+  assert.equal(makeExcerpts(content, "发布", [], 50).length, 50);
+});
+
+test("a property-only match still yields that property line", () => {
+  const hits = makeExcerpts("---\ncustom: uniquemarker\n---\nbody", "uniquemarker");
+  assert.deepEqual(hits.map((h) => h.line), [1]);
+});
+
+test("content results report how many lines matched, and hits() lists them", () => {
+  const engine = engineWith(doc("long.md", LONG));
+  const [hit] = engine.search("发布");
+  assert.equal(hit.hitCount, 3);
+  assert.deepEqual(engine.hits("long.md", "发布").map((h) => h.line), [3, 9, 11]);
+  assert.deepEqual(engine.hits("missing.md", "发布"), []);
+});
+
+test("a line counts as a hit only when it holds every query word, not a stray bigram", () => {
+  const content = "只提到发布。\n讲流程的一行。\n这里有发布流程。\n再一次发布流程\n";
+  assert.deepEqual(makeExcerpts(content, "发布流程").map((h) => h.line), [2, 3]);
+  assert.deepEqual(makeExcerpts(content, "发布 流程").map((h) => h.line), [2, 3]);
+  const engine = engineWith(doc("scattered.md", "只提到发布。\n讲流程的一行。\n"), doc("long.md", content));
+  const scattered = engine.search("发布流程").find((r) => r.path === "scattered.md");
+  assert.equal(scattered?.hitCount ?? 1, 1);
+});
+
+test("words answered by the path are not required on each body line", () => {
+  const engine = engineWith(doc("项目/a.md", "开头\n预算一\n无关\n预算二\n"));
+  const [hit] = engine.search("项目 预算");
+  assert.equal(hit.hitCount, 2);
+  assert.deepEqual(engine.hits("项目/a.md", "项目 预算").map((h) => h.line), [1, 3]);
+});
+
+test("a note with more hits than the list shows reports one past the cap", () => {
+  const content = Array.from({ length: 80 }, (_, i) => `第 ${i} 行提到发布`).join("\n");
+  const [hit] = engineWith(doc("many.md", content)).search("发布");
+  assert.equal(hit.hitCount, 51);
 });
