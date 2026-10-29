@@ -20,6 +20,8 @@ await esbuild.build({
   logLevel: "error",
   plugins: [{ name: "obsidian-stub", setup: (b) => b.onResolve({ filter: /^obsidian$/ }, () => ({ path: pathToFileURL(stub).href, external: true })) }],
 });
+// onload schedules the licence expiry check on window.
+globalThis.window ??= { setInterval: () => 0, clearInterval() {}, setTimeout };
 const { default: CrispSearchPlugin } = await import(pathToFileURL(path.join(outDir, "main.mjs")).href);
 
 async function setup(options = {}) {
@@ -29,7 +31,7 @@ async function setup(options = {}) {
   const files = ["a.md", "bad.md", "z.md"].map((p) => new TFile(p));
   const events = {};
   const app = {
-    workspace: { onLayoutReady: (fn) => fn() },
+    workspace: { layoutReady: true, onLayoutReady: (fn) => fn() },
     vault: {
       on: (name, fn) => (events[`vault:${name}`] = fn),
       getFiles: () => files,
@@ -83,7 +85,7 @@ test("recent commands load from data.json and are saved most recent first", asyn
   plugin.recordCommand("c:three");
   await plugin.saving;
   // Saves run one after another, so the last write is the latest list.
-  assert.deepEqual(plugin.saved.at(-1), { recentCommands: ["c:three", "b:two", "a:one"] });
+  assert.deepEqual(plugin.saved.at(-1), { licenseCode: "", recentCommands: ["c:three", "b:two", "a:one"] });
 });
 
 test("an unreadable data.json is never overwritten", async () => {
@@ -103,7 +105,8 @@ function deferred() {
 test("a slow read from a superseded rebuild cannot overwrite the newer index", async () => {
   const reads = [];
   const { plugin } = await setup({ read: () => { const d = deferred(); reads.push(d); return d.promise; } });
-  // onload started a rebuild; its read of a.md is pending.
+  plugin.rebuildIndex();
+  // The first rebuild's read of a.md is pending.
   await new Promise((r) => setImmediate(r));
   const first = reads.length;
   const newer = plugin.rebuildIndex();
@@ -128,6 +131,7 @@ test("a slow read from a superseded rebuild cannot overwrite the newer index", a
 test("a metadata change beats a read that was already in flight", async () => {
   const reads = [];
   const { plugin, files, events } = await setup({ read: () => { const d = deferred(); reads.push(d); return d.promise; } });
+  plugin.rebuildIndex();
   await new Promise((r) => setImmediate(r));
   events["cache:changed"](files[0], "freshmarker", null);
   reads[0].resolve("stalemarker");
@@ -149,6 +153,7 @@ test("a read started before a rename cannot overwrite what was read after it", a
       return d.promise;
     },
   });
+  plugin.rebuildIndex();
   await new Promise((r) => setImmediate(r));
   const pending = reads.find((r) => r.path === "a.md");
   const file = files[0];
@@ -197,4 +202,12 @@ test("an edit while the panel is open notifies listeners once per burst", async 
   events["cache:changed"](files[2], "two", null);
   await new Promise((r) => setImmediate(r));
   assert.equal(notified, 1);
+});
+
+test("without a licence the vault is not indexed", async () => {
+  const { plugin } = await setup();
+  await new Promise((r) => setImmediate(r));
+  assert.equal(plugin.licensed, false);
+  assert.equal(plugin.engine.size, 0);
+  assert.equal(plugin.ready, false);
 });

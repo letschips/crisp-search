@@ -5,6 +5,8 @@ export class Plugin {
     this.commands = [];
   }
   registerEvent() {}
+  registerInterval() {}
+  addSettingTab() {}
   addCommand(command) {
     this.commands.push(command);
   }
@@ -24,6 +26,16 @@ export class TFile extends TAbstractFile {
   }
 }
 export class Modal {}
+export class PluginSettingTab {
+  constructor(app, plugin) {
+    this.app = app;
+    this.plugin = plugin;
+  }
+  display() {}
+}
+export class Setting {}
+export function addIcon() {}
+export const requestUrl = undefined;
 export class Scope {}
 export class Notice {}
 export const Platform = { isMacOS: true };

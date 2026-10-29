@@ -387,3 +387,76 @@ body .crisp-search-container .modal.crisp-search-panel input.crisp-search-input.
 .is-mobile .crisp-search-panel::after {
   display: none;
 }
+
+/* Not activated: one line and a way to the licence settings instead of results. */
+
+.crisp-search-panel.is-locked .crisp-search-footer,
+.crisp-search-panel.is-locked::after {
+  display: none;
+}
+
+.crisp-search-locked {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 56px 14px;
+  color: var(--text-muted);
+  font-size: 14px;
+  text-align: center;
+}
+
+body .crisp-search-panel button.crisp-search-locked-button {
+  height: 32px;
+  padding: 0 16px;
+  border: none !important;
+  border-radius: 999px;
+  background: var(--interactive-accent) !important;
+  box-shadow: none !important;
+  color: var(--text-on-accent);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* Settings: about card, same as the other Crisp plugins */
+.crisp-search-about {
+  margin-top: 1.5rem;
+  padding: 1rem 1.15rem;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 12px;
+}
+
+.crisp-search-about__title,
+.crisp-search-about__description,
+.crisp-search-about__author {
+  margin: 0;
+}
+
+.crisp-search-about__title {
+  color: var(--text-normal);
+  font-size: 0.96rem;
+  font-weight: 650;
+}
+
+.crisp-search-about__description {
+  margin-top: 0.38rem;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.crisp-search-about__author {
+  margin-top: 0.72rem;
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+}
+
+.crisp-search-about__author-link {
+  color: var(--text-accent);
+  font-weight: 550;
+  text-decoration: none;
+}
+
+.crisp-search-about__author-link:hover {
+  text-decoration: underline;
+}

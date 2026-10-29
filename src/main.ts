@@ -1,6 +1,38 @@
-import { CachedMetadata, Command, Hotkey, Plugin, TAbstractFile, TFile, getAllTags, parseFrontMatterAliases } from "obsidian";
+import {
+  CachedMetadata,
+  Command,
+  Hotkey,
+  Notice,
+  Plugin,
+  TAbstractFile,
+  TFile,
+  addIcon,
+  getAllTags,
+  parseFrontMatterAliases,
+} from "obsidian";
+import { preserveUnreadableData, verifyDataWrite } from "./data-safety";
 import { SearchDoc, SearchEngine } from "./engine";
+import { CRISP_SEARCH_ICON, CRISP_SEARCH_ICON_SVG } from "./icon";
+import { discoverVaultCrispLicenses, verifyLicenseCode } from "./license";
+import { ActivationOutcome, LicenseController, LicenseResult } from "./license-controller";
 import { LauncherModal } from "./modal";
+import { CrispSearchSettingTab } from "./settings-tab";
+
+const PLUGIN_ID = "crisp-search";
+
+export interface SearchSettings {
+  licenseCode: string;
+  recentCommands: string[];
+}
+
+function normalizeSettings(raw: unknown): SearchSettings {
+  const data = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const recent = Array.isArray(data.recentCommands) ? data.recentCommands : [];
+  return {
+    licenseCode: typeof data.licenseCode === "string" ? data.licenseCode : "",
+    recentCommands: recent.filter((id): id is string => typeof id === "string").slice(0, RECENT_COMMAND_LIMIT),
+  };
+}
 
 const RECENT_COMMAND_LIMIT = 20;
 
@@ -34,39 +66,165 @@ export default class CrispSearchPlugin extends Plugin {
   // Files that are not in the index because their last read failed; cleared as soon as one indexes.
   private readonly failures = new Set<string>();
   private changeQueued = false;
-  recentCommands: string[] = [];
-  // False when data.json exists but could not be read: saving then would overwrite it with defaults.
-  private dataWritable = true;
+  settings: SearchSettings = normalizeSettings(null);
+  // data.json could not be read and could not be backed up: nothing is written this session.
+  private dataWriteBlocked = false;
+  private saveErrorShown = false;
+  private indexStarted = false;
+  private settingTab: CrispSearchSettingTab | null = null;
   private generation = 0;
   // Bumped by every index write for a path; a read that finishes after a newer write is dropped.
   private readonly versions = new Map<string, number>();
-  private saving: Promise<void> = Promise.resolve();
+  private saving: Promise<boolean> = Promise.resolve(true);
+  private readonly licenseController = new LicenseController({
+    verify: (code, online) => this.checkLicense(code, online),
+    discover: () => discoverVaultCrispLicenses(this.app, PLUGIN_ID),
+    getCode: () => this.settings.licenseCode,
+    persistCode: (code) => {
+      this.settings.licenseCode = code;
+      return this.saveSettings();
+    },
+    onChange: () => this.onLicenseChange(),
+  });
   private progressListeners = new Set<() => void>();
   private unloaded = false;
 
+  get recentCommands(): string[] {
+    return this.settings.recentCommands;
+  }
+
+  get license(): LicenseResult {
+    return this.licenseController.state;
+  }
+
+  /** Searching needs an activated licence; the index is only built once one is in place. */
+  get licensed(): boolean {
+    return this.licenseController.licensed;
+  }
+
+  get licenseUnsaved(): boolean {
+    return this.licenseController.unsaved;
+  }
+
   async onload(): Promise<void> {
-    const data: unknown = await this.loadData();
-    if (data === undefined) {
-      this.dataWritable = false;
-      console.warn("Crisp Search: data.json could not be read; recent commands will not be saved this session");
-    } else {
-      const recent = (data as { recentCommands?: unknown } | null)?.recentCommands;
-      if (Array.isArray(recent)) {
-        this.recentCommands = recent.filter((id): id is string => typeof id === "string").slice(0, RECENT_COMMAND_LIMIT);
-      }
-    }
+    const raw: unknown = await this.loadData();
+    await this.protectUnreadableData(raw);
+    this.settings = normalizeSettings(raw);
+    // Startup stays local: only the embedded-key signature check, the online check runs later.
+    await this.licenseController.loadLocal();
+    this.registerInterval(window.setInterval(() => this.licenseController.checkExpiry(), 60_000));
+
+    addIcon(CRISP_SEARCH_ICON, CRISP_SEARCH_ICON_SVG);
+    this.settingTab = new CrispSearchSettingTab(this.app, this);
+    this.addSettingTab(this.settingTab);
     this.addCommand({ id: "open", name: "打开搜索面板", callback: () => this.openLauncher() });
-    this.addCommand({ id: "rebuild-index", name: "重建搜索索引", callback: () => void this.rebuildIndex() });
-    this.addRibbonIcon("search", "Crisp Search", () => this.openLauncher());
+    this.addCommand({
+      id: "rebuild-index",
+      name: "重建搜索索引",
+      callback: () => {
+        if (this.licensed) void this.rebuildIndex();
+        else new Notice("Crisp Search 需要激活后才能使用");
+      },
+    });
+    this.addRibbonIcon(CRISP_SEARCH_ICON, "Crisp Search", () => this.openLauncher());
     this.app.workspace.onLayoutReady(() => {
+      // Obsidian queues this callback; the plugin may have been disabled or reloaded before it runs.
+      if (this.unloaded) return;
       this.watchVault();
-      void this.rebuildIndex();
+      this.startIndexIfLicensed();
+      void this.licenseController.refreshInBackground().catch((error) => {
+        console.debug("Crisp Search background license check failed", error);
+      });
     });
   }
 
   onunload(): void {
     this.unloaded = true;
+    this.licenseController.dispose();
     this.progressListeners.clear();
+  }
+
+  // Never overwrite a data.json that could not be read and could not be backed up either,
+  // and never write from an instance that has already been unloaded.
+  async saveData(data: unknown): Promise<void> {
+    if (this.dataWriteBlocked || this.unloaded) return;
+    await super.saveData(data);
+  }
+
+  /**
+   * Saves one after another and reads data.json back, because Obsidian's saveData() swallows write
+   * errors. Resolves false (after one notice) when the write could not be confirmed.
+   */
+  saveSettings(): Promise<boolean> {
+    const operation = this.saving.then(async () => {
+      // Taken when the write starts, so it includes every change made while this save waited.
+      const snapshot = JSON.parse(JSON.stringify(this.settings)) as SearchSettings;
+      if (this.unloaded || this.dataWriteBlocked) return false;
+      try {
+        await this.saveData(snapshot);
+        await verifyDataWrite(this.app.vault?.adapter, `${this.manifest?.dir}/data.json`, snapshot);
+        this.saveErrorShown = false;
+        return true;
+      } catch (error) {
+        console.debug("Crisp Search settings save failed", error);
+        if (!this.saveErrorShown) {
+          this.saveErrorShown = true;
+          new Notice("Crisp Search：设置没有写入磁盘，重启后会丢失。下次修改时会再试。");
+        }
+        return false;
+      }
+    });
+    this.saving = operation.catch(() => false);
+    return operation;
+  }
+
+  activate(code: string): Promise<ActivationOutcome> {
+    return this.licenseController.activate(code);
+  }
+
+  retrySaveLicense(): Promise<boolean> {
+    return this.licenseController.retrySave();
+  }
+
+  clearLicense(): Promise<boolean> {
+    return this.licenseController.clear();
+  }
+
+  openSettings(): void {
+    const setting = (this.app as unknown as { setting?: { open(): void; openTabById(id: string): void } }).setting;
+    setting?.open();
+    setting?.openTabById(this.manifest.id);
+  }
+
+  private async checkLicense(code: string, online: boolean): Promise<LicenseResult> {
+    const result = await verifyLicenseCode(code, PLUGIN_ID, online ? undefined : { online: false });
+    return { valid: result.valid, payload: result.payload, reason: result.reason };
+  }
+
+  private onLicenseChange(): void {
+    this.settingTab?.display();
+    this.startIndexIfLicensed();
+    // An open panel switches between the activation prompt and search.
+    this.emitProgress();
+  }
+
+  private startIndexIfLicensed(): void {
+    if (this.indexStarted || !this.licensed || this.unloaded || !this.app.workspace.layoutReady) return;
+    this.indexStarted = true;
+    void this.rebuildIndex();
+  }
+
+  // loadData() yields undefined when data.json exists but cannot be read; keep a copy before defaults take over.
+  private async protectUnreadableData(raw: unknown): Promise<void> {
+    if (raw !== undefined) return;
+    const result = await preserveUnreadableData(this.app.vault?.adapter, `${this.manifest?.dir}/data.json`);
+    if (result.state === "preserved") {
+      new Notice(`Crisp Search 的设置文件无法读取，已备份为 ${result.backupPath.split("/").pop()} 并恢复默认设置。`, 12000);
+    } else if (result.state === "failed") {
+      this.dataWriteBlocked = true;
+      console.error("Crisp Search could not back up unreadable data.json", result.error);
+      new Notice("Crisp Search 的设置文件无法读取，也无法备份。为保护原文件，本次运行不会保存设置。", 0);
+    }
   }
 
   openLauncher(): void {
@@ -88,13 +246,11 @@ export default class CrispSearchPlugin extends Plugin {
   }
 
   recordCommand(id: string): void {
-    this.recentCommands = [id, ...this.recentCommands.filter((other) => other !== id)].slice(0, RECENT_COMMAND_LIMIT);
-    if (!this.dataWritable) return;
-    // Queued so a slow write cannot land after, and undo, a later one.
-    const snapshot = { recentCommands: this.recentCommands };
-    this.saving = this.saving
-      .then(() => this.saveData(snapshot))
-      .catch((error) => console.warn("Crisp Search: could not save recent commands", error));
+    this.settings.recentCommands = [id, ...this.settings.recentCommands.filter((other) => other !== id)].slice(
+      0,
+      RECENT_COMMAND_LIMIT,
+    );
+    void this.saveSettings();
   }
 
   onProgress(listener: () => void): () => void {

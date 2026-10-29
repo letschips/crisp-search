@@ -106,6 +106,8 @@ export class LauncherModal extends Modal {
   private refreshPending = false;
   // True while an IME holds uncommitted text (raw pinyin) in the field.
   private composing = false;
+  // Whether the panel currently shows the activation prompt instead of search.
+  private lockedShown = false;
   // The body result whose hit list is showing, and where the list was when it opened.
   private drill: { item: FileItem; index: number; scrollTop: number } | null = null;
   private readonly fileActions: Action<FileItem>[];
@@ -234,6 +236,11 @@ export class LauncherModal extends Modal {
   // Index changes refresh file results but keep the selection; while the action menu is open the
   // refresh waits and runs when the menu closes.
   private onIndexProgress(): void {
+    if (this.lockedShown !== !this.plugin.licensed) {
+      this.renderStatus();
+      this.update();
+      return;
+    }
     this.renderStatus();
     // Mid-composition the field holds raw pinyin; compositionend searches with the committed text anyway.
     if (this.composing || !this.input.value.trim() || this.commandMode()) return;
@@ -258,7 +265,8 @@ export class LauncherModal extends Modal {
 
   private renderStatus(): void {
     const { ready, indexed, total, failed } = this.plugin;
-    if (!ready) this.statusEl.setText(`索引中 ${indexed}/${total}`);
+    if (!this.plugin.licensed) this.statusEl.setText("");
+    else if (!ready) this.statusEl.setText(`索引中 ${indexed}/${total}`);
     else this.statusEl.setText(failed.length ? `${failed.length} 个文件未能索引` : "");
     this.statusEl.setAttr("title", ready && failed.length ? `${failed.slice(0, 20).join("\n")}\n\n运行「重建搜索索引」重试` : "");
   }
@@ -333,11 +341,36 @@ export class LauncherModal extends Modal {
     const query = (commandMode ? raw.slice(1) : raw).trim();
     this.refreshPending = false;
     this.toggleActions(false);
+    if (!this.plugin.licensed) {
+      this.renderLocked();
+      return;
+    }
+    this.lockedShown = false;
+    this.modalEl.removeClass("is-locked");
     if (this.drill) this.items = this.hitItems(this.drill.item, query);
     else if (commandMode) this.items = this.commandItems(query, Infinity);
     else this.items = query ? this.searchItems(query) : this.recentItems();
     this.selected = 0;
     this.render(query, commandMode);
+  }
+
+  // Searching is for activated copies: the panel shows how to activate instead of results.
+  private renderLocked(): void {
+    this.lockedShown = true;
+    this.modalEl.addClass("is-locked");
+    this.drill = null;
+    this.items = [];
+    this.rows = [];
+    this.selected = 0;
+    this.listEl.empty();
+    this.input.removeAttribute("aria-activedescendant");
+    const locked = this.listEl.createDiv("crisp-search-locked");
+    locked.createDiv({ text: "Crisp Search 需要激活后才能搜索" });
+    const button = locked.createEl("button", { cls: "crisp-search-locked-button", text: "输入授权码" });
+    button.addEventListener("click", () => {
+      this.close();
+      this.plugin.openSettings();
+    });
   }
 
   private hitItems(parent: FileItem, query: string): Item[] {
