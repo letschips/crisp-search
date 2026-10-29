@@ -138,3 +138,63 @@ test("a metadata change beats a read that was already in flight", async () => {
   assert.deepEqual(plugin.engine.search("freshmarker").map((r) => r.path), ["a.md"]);
   assert.deepEqual(plugin.engine.search("stalemarker").map((r) => r.path).sort(), ["bad.md", "z.md"]);
 });
+
+// Audit round 3, R3-1: a read that started before a rename must not land under the new path.
+test("a read started before a rename cannot overwrite what was read after it", async () => {
+  const reads = [];
+  const { plugin, files, events } = await setup({
+    read: (file) => {
+      const d = deferred();
+      reads.push({ path: file.path, d });
+      return d.promise;
+    },
+  });
+  await new Promise((r) => setImmediate(r));
+  const pending = reads.find((r) => r.path === "a.md");
+  const file = files[0];
+  file.path = "new.md";
+  file.basename = "new";
+  events["vault:rename"](file, "a.md");
+  await new Promise((r) => setImmediate(r));
+  reads.find((r) => r.path === "new.md").d.resolve("newmarker");
+  await new Promise((r) => setImmediate(r));
+  pending.d.resolve("stalemarker");
+  for (let i = 0; i < 20; i++) {
+    await new Promise((r) => setImmediate(r));
+    for (const r of reads) r.d.resolve("other");
+  }
+  assert.deepEqual(plugin.engine.search("newmarker").map((r) => r.path), ["new.md"]);
+  assert.deepEqual(plugin.engine.search("stalemarker"), []);
+});
+
+// R3-4: the failure list must describe the current state, not only the last rebuild.
+test("a failed file that later indexes is no longer reported as failed", async () => {
+  const { plugin, files, events } = await setup({ fail: (p) => p === "bad.md" });
+  await plugin.rebuildIndex();
+  assert.deepEqual(plugin.failed, ["bad.md"]);
+  let notified = 0;
+  plugin.onProgress(() => notified++);
+  events["cache:changed"](files[1], "recoveredmarker", null);
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(plugin.failed, []);
+  assert.ok(notified > 0);
+  assert.deepEqual(plugin.engine.search("recoveredmarker").map((r) => r.path), ["bad.md"]);
+});
+
+test("a deleted failed file leaves the failure list", async () => {
+  const { plugin, files, events } = await setup({ fail: (p) => p === "bad.md" });
+  await plugin.rebuildIndex();
+  events["vault:delete"](files[1]);
+  assert.deepEqual(plugin.failed, []);
+});
+
+test("an edit while the panel is open notifies listeners once per burst", async () => {
+  const { plugin, files, events } = await setup();
+  await plugin.rebuildIndex();
+  let notified = 0;
+  plugin.onProgress(() => notified++);
+  events["cache:changed"](files[0], "one", null);
+  events["cache:changed"](files[2], "two", null);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(notified, 1);
+});

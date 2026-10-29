@@ -39,6 +39,8 @@ const ALT = Platform.isMacOS ? "⌥" : "Alt";
 const MODIFIER_KEYS: Record<string, string> = Platform.isMacOS
   ? { Mod: "⌘", Ctrl: "⌃", Meta: "⌘", Alt: "⌥", Shift: "⇧" }
   : { Mod: "Ctrl", Ctrl: "Ctrl", Meta: "Win", Alt: "Alt", Shift: "Shift" };
+// One table for what the menu shows and what Enter does, so the two cannot drift apart.
+const MODE_KEYS: Record<OpenMode, string[]> = { current: ["↵"], tab: [MOD, "↵"], split: [MOD, ALT, "↵"] };
 const KEY_NAMES: Record<string, string> = { ArrowUp: "↑", ArrowDown: "↓", ArrowLeft: "←", ArrowRight: "→", Enter: "↵", " ": "Space" };
 
 function hotkeyKeys(hotkey: Hotkey): string[] {
@@ -89,6 +91,7 @@ export class LauncherModal extends Modal {
   private stopProgress: (() => void) | null = null;
   private escapeScope: Scope | null = null;
   private idPrefix = "";
+  private refreshPending = false;
   private readonly fileActions: Action<FileItem>[];
   private readonly commandActions: Action<CommandItem>[];
   private primaryLabel: HTMLElement | null = null;
@@ -99,9 +102,9 @@ export class LauncherModal extends Modal {
     super(app);
     this.plugin = plugin;
     this.fileActions = [
-      { label: "打开", icon: "file-input", keys: ["↵"], run: (item) => void this.openFile(item, "current") },
-      { label: "在新标签页打开", icon: "plus-square", keys: [MOD, "↵"], run: (item) => void this.openFile(item, "tab") },
-      { label: "在右侧打开", icon: "columns-2", keys: [MOD, ALT, "↵"], run: (item) => void this.openFile(item, "split") },
+      { label: "打开", icon: "file-input", keys: MODE_KEYS.current, run: (item) => void this.openFile(item, "current") },
+      { label: "在新标签页打开", icon: "plus-square", keys: MODE_KEYS.tab, run: (item) => void this.openFile(item, "tab") },
+      { label: "在右侧打开", icon: "columns-2", keys: MODE_KEYS.split, run: (item) => void this.openFile(item, "split") },
       { label: "复制链接", icon: "link", keys: [], run: (item) => this.copyLink(item) },
     ];
     this.commandActions = [
@@ -193,10 +196,16 @@ export class LauncherModal extends Modal {
     if (this.escapeScope) this.app.keymap.popScope(this.escapeScope);
   }
 
-  // Progress refreshes file results but keeps the selection, and waits while the action menu is open.
+  // Index changes refresh file results but keep the selection; while the action menu is open the
+  // refresh waits and runs when the menu closes.
   private onIndexProgress(): void {
     this.renderStatus();
-    if (this.actionsOpen || !this.input.value.trim() || this.commandMode()) return;
+    if (!this.input.value.trim() || this.commandMode()) return;
+    if (this.actionsOpen) this.refreshPending = true;
+    else this.refreshKeepingSelection();
+  }
+
+  private refreshKeepingSelection(): void {
     const selected = this.items[this.selected];
     const scrollTop = this.listEl.scrollTop;
     this.update();
@@ -240,7 +249,11 @@ export class LauncherModal extends Modal {
         this.renderActions();
       } else if (evt.key === "Enter") {
         evt.preventDefault();
-        this.runAction(this.actionIndex);
+        // A modified Enter means the action it is shown next to, whichever row is highlighted.
+        const mode = this.modeFor(evt);
+        const item = this.items[this.selected];
+        if (mode !== "current" && item) this.activate(item, mode);
+        else this.runAction(this.actionIndex);
       }
       return;
     }
@@ -266,6 +279,7 @@ export class LauncherModal extends Modal {
     const raw = this.input.value.trimStart();
     const commandMode = COMMAND_PREFIX.test(raw);
     const query = (commandMode ? raw.slice(1) : raw).trim();
+    this.refreshPending = false;
     this.toggleActions(false);
     if (commandMode) this.items = this.commandItems(query, Infinity);
     else this.items = query ? this.searchItems(query) : this.recentItems();
@@ -401,6 +415,10 @@ export class LauncherModal extends Modal {
     this.actionIndex = 0;
     this.actionsEl.toggleClass("is-open", open);
     if (open) this.renderActions();
+    else if (this.refreshPending) {
+      this.refreshPending = false;
+      this.refreshKeepingSelection();
+    }
   }
 
   private actionsFor(item: Item | undefined): Action[] {

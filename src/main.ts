@@ -31,7 +31,9 @@ export default class CrispSearchPlugin extends Plugin {
   indexed = 0;
   total = 0;
   ready = false;
-  failed: string[] = [];
+  // Files that are not in the index because their last read failed; cleared as soon as one indexes.
+  private readonly failures = new Set<string>();
+  private changeQueued = false;
   recentCommands: string[] = [];
   // False when data.json exists but could not be read: saving then would overwrite it with defaults.
   private dataWritable = true;
@@ -100,8 +102,22 @@ export default class CrispSearchPlugin extends Plugin {
     return () => this.progressListeners.delete(listener);
   }
 
+  get failed(): string[] {
+    return [...this.failures];
+  }
+
   private emitProgress(): void {
     for (const listener of this.progressListeners) listener();
+  }
+
+  // Edits arrive in bursts (a save, a sync); listeners hear about each burst once.
+  private notifyChange(): void {
+    if (this.changeQueued) return;
+    this.changeQueued = true;
+    queueMicrotask(() => {
+      this.changeQueued = false;
+      if (!this.unloaded) this.emitProgress();
+    });
   }
 
   isIgnored(path: string): boolean {
@@ -123,8 +139,9 @@ export default class CrispSearchPlugin extends Plugin {
     this.registerEvent(
       this.app.metadataCache.on("changed", (file, data, cache) => {
         this.bump(file.path);
-        if (this.isIgnored(file.path)) this.engine.remove(file.path);
+        if (this.isIgnored(file.path)) this.removePath(file.path);
         else this.upsert(file, data, cache);
+        this.notifyChange();
       }),
     );
   }
@@ -136,7 +153,6 @@ export default class CrispSearchPlugin extends Plugin {
     this.ready = false;
     this.indexed = 0;
     this.total = files.length;
-    const failed: string[] = [];
     this.emitProgress();
     let sliceStart = performance.now();
     const current = () => !this.unloaded && generation === this.generation;
@@ -148,7 +164,7 @@ export default class CrispSearchPlugin extends Plugin {
         // One unreadable file must not stop the rest of the vault from being indexed.
         console.warn(`Crisp Search: could not index ${file.path}`, error);
         this.engine.remove(file.path);
-        failed.push(file.path);
+        this.failures.add(file.path);
       }
       if (!current()) return;
       this.indexed++;
@@ -162,15 +178,20 @@ export default class CrispSearchPlugin extends Plugin {
     // Judge against the vault as it is now: files created during the pass are indexed by their own events.
     const kept = new Set(this.app.vault.getFiles().filter((file) => !this.isIgnored(file.path)).map((file) => file.path));
     for (const path of this.engine.paths()) if (!kept.has(path)) this.engine.remove(path);
-    this.failed = failed;
+    for (const path of this.failures) if (!kept.has(path)) this.failures.delete(path);
     this.ready = true;
     this.emitProgress();
   }
 
   private onFileEvent(file: TAbstractFile): void {
-    if (file instanceof TFile) {
-      this.indexFile(file).catch((error) => console.warn(`Crisp Search: could not index ${file.path}`, error));
-    }
+    if (!(file instanceof TFile)) return;
+    const path = file.path;
+    this.indexFile(file)
+      .catch((error) => {
+        console.warn(`Crisp Search: could not index ${path}`, error);
+        this.failures.add(path);
+      })
+      .finally(() => this.notifyChange());
   }
 
   private bump(path: string): number {
@@ -182,12 +203,16 @@ export default class CrispSearchPlugin extends Plugin {
   private removePath(path: string): void {
     this.bump(path);
     this.engine.remove(path);
+    this.failures.delete(path);
+    this.notifyChange();
   }
 
   // Throws only for a read failure that is still current; outdated reads are dropped silently.
   private async indexFile(file: TFile, current: () => boolean = () => true): Promise<void> {
-    const version = this.bump(file.path);
-    const fresh = () => current() && this.versions.get(file.path) === version;
+    // The TFile is renamed in place, so the path is fixed now: after a rename this read belongs to no one.
+    const path = file.path;
+    const version = this.bump(path);
+    const fresh = () => current() && file.path === path && this.versions.get(path) === version;
     if (this.isIgnored(file.path)) {
       this.engine.remove(file.path);
       return;
@@ -204,7 +229,7 @@ export default class CrispSearchPlugin extends Plugin {
       return;
     }
     // A newer pass or event has written this path, or the file was deleted while it was being read.
-    if (!fresh() || this.app.vault.getAbstractFileByPath(file.path) !== file) return;
+    if (!fresh() || this.app.vault.getAbstractFileByPath(path) !== file) return;
     this.upsert(file, content, this.app.metadataCache.getFileCache(file));
   }
 
@@ -219,5 +244,6 @@ export default class CrispSearchPlugin extends Plugin {
       aliases: parseFrontMatterAliases(cache?.frontmatter ?? null) ?? [],
     };
     this.engine.upsert(doc);
+    this.failures.delete(file.path);
   }
 }
