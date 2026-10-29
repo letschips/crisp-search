@@ -1,0 +1,10 @@
+{
+  "id": "crisp-search",
+  "name": "Crisp Search",
+  "version": "0.1.0",
+  "minAppVersion": "1.6.0",
+  "description": "A launcher-style search panel for notes and text, tuned for Chinese with pinyin matching.",
+  "author": "letschips",
+  "authorUrl": "https://github.com/letschips",
+  "isDesktopOnly": false
+}

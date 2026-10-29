@@ -1,0 +1,327 @@
+/* Crisp Search: a launcher-style panel. Colours come from the active theme, so light and dark both follow it. */
+
+.crisp-search-container {
+  align-items: flex-start;
+  padding-top: 14vh;
+}
+
+.crisp-search-container .modal-bg {
+  opacity: 0.2 !important;
+}
+
+.modal.crisp-search-panel {
+  --crisp-search-radius: 26px;
+  --crisp-search-line: color-mix(in srgb, var(--text-normal) 10%, transparent);
+  --crisp-search-hover: color-mix(in srgb, var(--text-normal) 8%, transparent);
+  --crisp-search-glass: color-mix(in srgb, var(--background-primary) 76%, transparent);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(760px, calc(100vw - 32px));
+  height: min(480px, 72vh);
+  max-height: none;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--crisp-search-line);
+  border-radius: var(--crisp-search-radius);
+  background: var(--crisp-search-glass);
+  -webkit-backdrop-filter: blur(40px) saturate(1.8);
+  backdrop-filter: blur(40px) saturate(1.8);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, white 30%, transparent),
+    0 24px 80px rgba(0, 0, 0, 0.22),
+    0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .modal.crisp-search-panel {
+    background: var(--background-primary);
+  }
+}
+
+/* Search field */
+
+.crisp-search-bar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 14px;
+  height: 66px;
+  padding: 0 24px;
+}
+
+.crisp-search-bar-icon {
+  display: flex;
+  color: var(--text-muted);
+}
+
+.crisp-search-bar-icon svg {
+  width: 22px;
+  height: 22px;
+  stroke-width: 2;
+}
+
+.crisp-search-panel input.crisp-search-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-normal);
+  font-size: 21px;
+  font-weight: 400;
+}
+
+.crisp-search-panel input.crisp-search-input:focus,
+.crisp-search-panel input.crisp-search-input:focus-visible {
+  border: none;
+  box-shadow: none;
+  outline: none;
+}
+
+.crisp-search-panel input.crisp-search-input::placeholder {
+  color: var(--text-faint);
+}
+
+.crisp-search-status {
+  flex: none;
+  color: var(--text-faint);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Results */
+
+.crisp-search-list {
+  flex: 1;
+  min-height: 0;
+  padding: 0 8px 68px;
+  overflow-y: auto;
+  -webkit-mask-image: linear-gradient(to bottom, black calc(100% - 72px), transparent calc(100% - 8px));
+  mask-image: linear-gradient(to bottom, black calc(100% - 72px), transparent calc(100% - 8px));
+}
+
+.crisp-search-section {
+  padding: 10px 14px 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.crisp-search-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 44px;
+  padding: 0 14px;
+  border-radius: 12px;
+  cursor: default;
+}
+
+.crisp-search-item.is-selected {
+  background: var(--crisp-search-hover);
+}
+
+.crisp-search-item-icon {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--text-normal) 7%, transparent);
+  color: var(--text-muted);
+}
+
+.crisp-search-item-icon svg {
+  width: 15px;
+  height: 15px;
+}
+
+.crisp-search-item-text {
+  display: flex;
+  flex: 1;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.crisp-search-item-title {
+  flex: 0 1 auto;
+  min-width: 2em;
+  overflow: hidden;
+  color: var(--text-normal);
+  font-size: 15px;
+  text-overflow: ellipsis;
+}
+
+.crisp-search-item-subtitle {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 13px;
+  text-overflow: ellipsis;
+}
+
+.crisp-search-item-title:has(+ .crisp-search-item-subtitle) {
+  max-width: 45%;
+}
+
+.crisp-search-item-accessory {
+  flex: none;
+  max-width: 28%;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.crisp-search-panel mark {
+  background: none;
+  color: var(--text-normal);
+  font-weight: 600;
+}
+
+.crisp-search-empty {
+  padding: 28px 14px;
+  color: var(--text-muted);
+  font-size: 14px;
+  text-align: center;
+}
+
+/* Floating action bar */
+
+.crisp-search-panel kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 5px;
+  border: 1px solid var(--crisp-search-line);
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+  font-family: var(--font-interface);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.crisp-search-footer {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px;
+  border: 1px solid var(--crisp-search-line);
+  border-radius: 999px;
+  background: var(--crisp-search-glass);
+  -webkit-backdrop-filter: blur(24px) saturate(1.6);
+  backdrop-filter: blur(24px) saturate(1.6);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
+}
+
+.crisp-search-footer-action {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 32px;
+  padding: 0 8px 0 14px;
+  border-radius: 999px;
+  color: var(--text-normal);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: default;
+}
+
+.crisp-search-footer-action > span {
+  margin-right: 6px;
+}
+
+.crisp-search-footer-action:hover {
+  background: var(--crisp-search-hover);
+}
+
+/* ⌘K actions */
+
+.crisp-search-actions {
+  position: absolute;
+  right: 12px;
+  bottom: 62px;
+  display: none;
+  width: 260px;
+  padding: 6px;
+  border: 1px solid var(--crisp-search-line);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--background-primary) 88%, transparent);
+  -webkit-backdrop-filter: blur(30px) saturate(1.8);
+  backdrop-filter: blur(30px) saturate(1.8);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.2);
+}
+
+.crisp-search-actions.is-open {
+  display: block;
+}
+
+.crisp-search-action {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 36px;
+  padding: 0 10px;
+  border-radius: 10px;
+  color: var(--text-normal);
+  font-size: 14px;
+  cursor: default;
+}
+
+.crisp-search-action.is-selected {
+  background: var(--crisp-search-hover);
+}
+
+.crisp-search-action-icon {
+  display: flex;
+  color: var(--text-muted);
+}
+
+.crisp-search-action-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.crisp-search-action-label {
+  flex: 1;
+}
+
+.crisp-search-action-keys {
+  display: flex;
+  gap: 3px;
+}
+
+/* Phones: full width near the top, leaving room for the keyboard. */
+
+.is-mobile .crisp-search-container {
+  padding-top: calc(var(--safe-area-inset-top, 0px) + 12px);
+}
+
+.is-mobile .modal.crisp-search-panel {
+  width: calc(100vw - 24px);
+  height: min(70vh, 520px);
+  --crisp-search-radius: 22px;
+}
+
+.is-mobile .crisp-search-list {
+  padding-bottom: 12px;
+  -webkit-mask-image: none;
+  mask-image: none;
+}
