@@ -65,10 +65,10 @@
   font-weight: 400;
 }
 
-/* Themes restyle modal inputs with !important (Still in translucent mode does); the field must stay bare. */
-body .crisp-search-container .modal.crisp-search-panel input.crisp-search-input.crisp-search-input,
-body .crisp-search-container .modal.crisp-search-panel input.crisp-search-input.crisp-search-input:focus,
-body .crisp-search-container .modal.crisp-search-panel input.crisp-search-input.crisp-search-input:focus-visible {
+/* Themes restyle modal inputs with !important and high-specificity :is() lists (Still in translucent mode
+   does); the repeated class outranks them so the field stays bare. */
+body .crisp-search-container .modal.crisp-search-panel input.crisp-search-input.crisp-search-input.crisp-search-input.crisp-search-input.crisp-search-input.crisp-search-input,
+body .crisp-search-container .modal.crisp-search-panel input.crisp-search-input.crisp-search-input.crisp-search-input.crisp-search-input.crisp-search-input.crisp-search-input:is(:hover, :focus, :focus-visible, :active) {
   border-color: transparent !important;
   background: transparent !important;
   box-shadow: none !important;
@@ -93,6 +93,24 @@ body .crisp-search-container .modal.crisp-search-panel input.crisp-search-input.
   min-height: 0;
   padding: 0 8px 68px;
   overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.crisp-search-list::-webkit-scrollbar {
+  display: none;
+}
+
+/* Rows fade out under the action bar. A plain gradient paint, not a mask, so no extra layer. */
+.crisp-search-panel::after {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 76px;
+  border-radius: 0 0 var(--crisp-search-radius) var(--crisp-search-radius);
+  background: linear-gradient(to bottom, transparent, var(--background-primary) 70%);
+  content: "";
+  pointer-events: none;
 }
 
 .crisp-search-section {
@@ -176,9 +194,9 @@ body .crisp-search-container .modal.crisp-search-panel input.crisp-search-input.
 }
 
 .crisp-search-panel mark {
-  background: none;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--text-normal) 11%, transparent);
   color: var(--text-normal);
-  font-weight: 600;
 }
 
 .crisp-search-empty {
@@ -209,6 +227,7 @@ body .crisp-search-container .modal.crisp-search-panel input.crisp-search-input.
 
 .crisp-search-footer {
   position: absolute;
+  z-index: 1;
   right: 12px;
   bottom: 12px;
   display: flex;
@@ -246,6 +265,7 @@ body .crisp-search-container .modal.crisp-search-panel input.crisp-search-input.
 
 .crisp-search-actions {
   position: absolute;
+  z-index: 2;
   right: 12px;
   bottom: 62px;
   display: none;
@@ -310,4 +330,8 @@ body .crisp-search-container .modal.crisp-search-panel input.crisp-search-input.
 
 .is-mobile .crisp-search-list {
   padding-bottom: 12px;
+}
+
+.is-mobile .crisp-search-panel::after {
+  display: none;
 }

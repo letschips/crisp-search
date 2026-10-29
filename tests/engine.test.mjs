@@ -126,3 +126,14 @@ test("excerpts collapse line breaks and Markdown markers", () => {
   assert.ok(!excerpt.text.includes("**"));
   assert.deepEqual(excerpt.ranges.map(([s, e]) => excerpt.text.slice(s, e)), ["周报"]);
 });
+
+test("excerpts open at a sentence or word boundary, never inside an English word", () => {
+  const en = makeExcerpt("An intro text; only release files.", "release");
+  assert.equal(en.text, "…only release files.");
+  const word = makeExcerpt("aaaa bbbb cccc dddd eeee ffff gggg hhhh release", "release");
+  assert.equal(word.text, "…gggg hhhh release");
+  const zh = makeExcerpt("前面有一段很长很长很长很长很长的铺垫文字，说的是别的事情。这里讲发布流程的细节", "发布流程");
+  assert.ok(zh.text.startsWith("…这里讲发布流程"), zh.text);
+  const comma = makeExcerpt("甲".repeat(10) + "，" + "乙".repeat(9) + "发布", "发布");
+  assert.ok(!/^…[，,]/.test(comma.text), comma.text);
+});

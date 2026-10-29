@@ -140,7 +140,9 @@ function cleanMarkdown(text: string): string {
     .trim();
 }
 
-const EXCERPT_BEFORE = 24;
+const EXCERPT_BEFORE = 10;
+const SENTENCE_BREAKS = ["。", "！", "？", "；", ". ", "! ", "? ", "; "];
+const WORD_CHAR = /[A-Za-z0-9_]/;
 const EXCERPT_AFTER = 140;
 
 export function makeExcerpt(content: string, query: string): Excerpt {
@@ -153,7 +155,15 @@ export function makeExcerpt(content: string, query: string): Excerpt {
   const start = Math.max(0, at - EXCERPT_BEFORE);
   // Start on a line boundary when one is close, so the excerpt does not open mid-sentence.
   const lineStart = body.lastIndexOf("\n", at - 1) + 1;
-  const from = lineStart >= start ? lineStart : start;
+  let from = lineStart >= start ? lineStart : start;
+  if (from > lineStart) {
+    // Prefer the start of the sentence; otherwise do not cut an English word in half.
+    const lead = body.slice(from, at);
+    const sentence = Math.max(...SENTENCE_BREAKS.map((mark) => lead.lastIndexOf(mark)));
+    if (sentence !== -1) from += sentence + 1;
+    else while (from < at && WORD_CHAR.test(body[from - 1]) && WORD_CHAR.test(body[from])) from++;
+    while (from < at && /[\s，、,:：）)」』]/.test(body[from])) from++;
+  }
   let text = cleanMarkdown(body.slice(from, at + EXCERPT_AFTER));
   if (from > lineStart) text = "…" + text;
   return { text, ranges: findRanges(text, parts), line };

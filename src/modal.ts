@@ -1,4 +1,4 @@
-import { App, Keymap, Modal, Notice, Platform, TFile, setIcon } from "obsidian";
+import { App, Keymap, Modal, Notice, Platform, Scope, TFile, setIcon } from "obsidian";
 import { SearchResult, highlightRanges } from "./engine";
 import type CrispSearchPlugin from "./main";
 
@@ -61,6 +61,7 @@ export class LauncherModal extends Modal {
   private actionsOpen = false;
   private pointer = { x: -1, y: -1 };
   private stopProgress: (() => void) | null = null;
+  private escapeScope: Scope | null = null;
   private readonly actions: Action[];
 
   constructor(app: App, plugin: CrispSearchPlugin) {
@@ -126,6 +127,17 @@ export class LauncherModal extends Modal {
       void this.openItem(this.items[index], this.modeFor(evt));
     });
 
+    // The modal's own scope closes on Escape before the field sees the key, so a child scope on top
+    // takes Escape first: it closes the action menu, and leaves an IME composition to the IME.
+    this.escapeScope = new Scope(this.scope);
+    this.escapeScope.register([], "Escape", (evt) => {
+      if (evt.isComposing) return false;
+      if (this.actionsOpen) this.toggleActions(false);
+      else this.close();
+      return false;
+    });
+    this.app.keymap.pushScope(this.escapeScope);
+
     this.stopProgress = this.plugin.onProgress(() => this.onIndexProgress());
     this.renderStatus();
     this.update();
@@ -134,6 +146,7 @@ export class LauncherModal extends Modal {
 
   onClose(): void {
     this.stopProgress?.();
+    if (this.escapeScope) this.app.keymap.popScope(this.escapeScope);
   }
 
   private onIndexProgress(): void {
@@ -168,10 +181,6 @@ export class LauncherModal extends Modal {
       } else if (evt.key === "Enter") {
         evt.preventDefault();
         this.runAction(this.actionIndex);
-      } else if (evt.key === "Escape") {
-        evt.preventDefault();
-        evt.stopPropagation();
-        this.toggleActions(false);
       }
       return;
     }
