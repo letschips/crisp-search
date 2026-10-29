@@ -211,3 +211,32 @@ test("without a licence the vault is not indexed", async () => {
   assert.equal(plugin.engine.size, 0);
   assert.equal(plugin.ready, false);
 });
+
+// Licence gate: nothing is indexed before activation, and losing the licence drops the index.
+function setLicensed(plugin, value) {
+  // The settings tab redraws on licence changes; the fake host has no settings DOM.
+  plugin.settingTab = null;
+  Object.defineProperty(plugin, "licensed", { get: () => value, configurable: true });
+  plugin.onLicenseChange();
+}
+
+test("edits made before activation are not indexed", async () => {
+  const { plugin, files, events } = await setup();
+  events["cache:changed"](files[0], "earlymarker", null);
+  events["vault:create"](files[2]);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(plugin.engine.size, 0);
+});
+
+test("activation starts indexing, and losing the licence clears the index", async () => {
+  const { plugin } = await setup();
+  setLicensed(plugin, true);
+  for (let i = 0; i < 20 && !plugin.ready; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(plugin.engine.size, 3);
+  setLicensed(plugin, false);
+  assert.equal(plugin.engine.size, 0);
+  assert.equal(plugin.ready, false);
+  setLicensed(plugin, true);
+  for (let i = 0; i < 20 && !plugin.ready; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(plugin.engine.size, 3);
+});

@@ -203,15 +203,27 @@ export default class CrispSearchPlugin extends Plugin {
 
   private onLicenseChange(): void {
     this.settingTab?.display();
-    this.startIndexIfLicensed();
+    if (this.licensed) this.startIndexIfLicensed();
+    else if (this.indexStarted) this.stopIndex();
     // An open panel switches between the activation prompt and search.
     this.emitProgress();
   }
 
   private startIndexIfLicensed(): void {
     if (this.indexStarted || !this.licensed || this.unloaded || !this.app.workspace.layoutReady) return;
-    this.indexStarted = true;
     void this.rebuildIndex();
+  }
+
+  // Licence cleared, expired or revoked: the running pass stops and the index is dropped. Activating
+  // again builds it anew.
+  private stopIndex(): void {
+    this.indexStarted = false;
+    this.generation++;
+    this.ready = false;
+    this.indexed = 0;
+    this.total = 0;
+    for (const path of this.engine.paths()) this.engine.remove(path);
+    this.failures.clear();
   }
 
   // loadData() yields undefined when data.json exists but cannot be read; keep a copy before defaults take over.
@@ -282,11 +294,13 @@ export default class CrispSearchPlugin extends Plugin {
   }
 
   // Registered once the layout is ready, so the vault's start-up create events are not replayed here.
+  // Until a licence starts the index, events are ignored: an unactivated copy indexes nothing.
   private watchVault(): void {
-    this.registerEvent(this.app.vault.on("create", (file) => this.onFileEvent(file)));
-    this.registerEvent(this.app.vault.on("delete", (file) => this.removePath(file.path)));
+    this.registerEvent(this.app.vault.on("create", (file) => this.indexStarted && this.onFileEvent(file)));
+    this.registerEvent(this.app.vault.on("delete", (file) => this.indexStarted && this.removePath(file.path)));
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
+        if (!this.indexStarted) return;
         this.removePath(oldPath);
         this.onFileEvent(file);
       }),
@@ -294,6 +308,7 @@ export default class CrispSearchPlugin extends Plugin {
     // The event carries the file's current text, so it is applied at once and outdates pending reads.
     this.registerEvent(
       this.app.metadataCache.on("changed", (file, data, cache) => {
+        if (!this.indexStarted) return;
         this.bump(file.path);
         if (this.isIgnored(file.path)) this.removePath(file.path);
         else this.upsert(file, data, cache);
@@ -304,6 +319,8 @@ export default class CrispSearchPlugin extends Plugin {
 
   // Re-reads every file. Results stay searchable meanwhile; files gone from the vault are dropped at the end.
   async rebuildIndex(): Promise<void> {
+    // From the first pass on, vault events keep the index current.
+    this.indexStarted = true;
     const generation = ++this.generation;
     const files = this.app.vault.getFiles().filter((file) => !this.isIgnored(file.path));
     this.ready = false;

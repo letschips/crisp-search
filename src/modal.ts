@@ -279,7 +279,8 @@ export class LauncherModal extends Modal {
 
   private onKeyDown(evt: KeyboardEvent): void {
     if (evt.isComposing || evt.keyCode === 229) return;
-    if (evt.key === "k" && Keymap.isModEvent(evt)) {
+    // Caps Lock turns the key into "K".
+    if (evt.key.toLowerCase() === "k" && Keymap.isModEvent(evt)) {
       evt.preventDefault();
       this.toggleActions();
       return;
