@@ -34,6 +34,7 @@ async function setup(options = {}) {
       on: (name, fn) => (events[`vault:${name}`] = fn),
       getFiles: () => files,
       cachedRead: async (file) => {
+        if (options.read) return options.read(file);
         if (fail(file.path)) throw new Error("EIO");
         return `正文 ${file.basename}`;
       },
@@ -79,7 +80,10 @@ test("recent commands load from data.json and are saved most recent first", asyn
   const { plugin } = await setup({ data: { recentCommands: ["a:one", 3, "b:two"] } });
   assert.deepEqual(plugin.recentCommands, ["a:one", "b:two"]);
   plugin.recordCommand("b:two");
-  assert.deepEqual(plugin.saved.at(-1), { recentCommands: ["b:two", "a:one"] });
+  plugin.recordCommand("c:three");
+  await plugin.saving;
+  // Saves run one after another, so the last write is the latest list.
+  assert.deepEqual(plugin.saved.at(-1), { recentCommands: ["c:three", "b:two", "a:one"] });
 });
 
 test("an unreadable data.json is never overwritten", async () => {
@@ -87,4 +91,50 @@ test("an unreadable data.json is never overwritten", async () => {
   plugin.recordCommand("a:one");
   assert.deepEqual(plugin.recentCommands, ["a:one"]);
   assert.deepEqual(plugin.saved, []);
+});
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((r) => (resolve = r));
+  return { promise, resolve };
+}
+
+// R2-2: an older read that resolves late must not overwrite what a newer pass or event indexed.
+test("a slow read from a superseded rebuild cannot overwrite the newer index", async () => {
+  const reads = [];
+  const { plugin } = await setup({ read: () => { const d = deferred(); reads.push(d); return d.promise; } });
+  // onload started a rebuild; its read of a.md is pending.
+  await new Promise((r) => setImmediate(r));
+  const first = reads.length;
+  const newer = plugin.rebuildIndex();
+  await new Promise((r) => setImmediate(r));
+  for (const d of reads.slice(first)) d.resolve("newmarker");
+  // Later reads of the newer pass resolve with the new content too.
+  const settle = async () => {
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setImmediate(r));
+      for (const d of reads.slice(first)) d.resolve("newmarker");
+    }
+  };
+  await settle();
+  await newer;
+  for (const d of reads.slice(0, first)) d.resolve("oldmarker");
+  await settle();
+  assert.equal(plugin.engine.search("newmarker").length, 3);
+  assert.deepEqual(plugin.engine.search("oldmarker"), []);
+  assert.equal(plugin.indexed, plugin.total);
+});
+
+test("a metadata change beats a read that was already in flight", async () => {
+  const reads = [];
+  const { plugin, files, events } = await setup({ read: () => { const d = deferred(); reads.push(d); return d.promise; } });
+  await new Promise((r) => setImmediate(r));
+  events["cache:changed"](files[0], "freshmarker", null);
+  reads[0].resolve("stalemarker");
+  for (let i = 0; i < 20; i++) {
+    await new Promise((r) => setImmediate(r));
+    for (const d of reads) d.resolve("stalemarker");
+  }
+  assert.deepEqual(plugin.engine.search("freshmarker").map((r) => r.path), ["a.md"]);
+  assert.deepEqual(plugin.engine.search("stalemarker").map((r) => r.path).sort(), ["bad.md", "z.md"]);
 });

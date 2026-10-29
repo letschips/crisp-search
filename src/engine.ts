@@ -136,10 +136,29 @@ export function highlightRanges(text: string, query: string): [number, number][]
   return findRanges(text, queryParts(query));
 }
 
-function cleanMarkdown(text: string): string {
+// Splits text for rendering; overlapping or repeated ranges never repeat a character.
+export function highlightSegments(text: string, ranges: [number, number][]): { text: string; mark: boolean }[] {
+  const segments: { text: string; mark: boolean }[] = [];
+  let at = 0;
+  for (const [rawStart, end] of [...ranges].sort((a, b) => a[0] - b[0])) {
+    const start = Math.max(rawStart, at);
+    if (end <= start) continue;
+    if (start > at) segments.push({ text: text.slice(at, start), mark: false });
+    segments.push({ text: text.slice(start, end), mark: true });
+    at = end;
+  }
+  if (at < text.length) segments.push({ text: text.slice(at), mark: false });
+  return segments;
+}
+
+// Links collapse to their display text, unless the hidden target is what matched: then it stays visible.
+function cleanMarkdown(text: string, needles: string[]): string {
+  const matched = (hidden: string) => needles.some((needle) => hidden.toLowerCase().includes(needle));
   return text
-    .replace(/!?\[\[([^\]|]*\|)?([^\]]*)\]\]/g, "$2")
-    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/!?\[\[([^\]|]*)(?:\|([^\]]*))?\]\]/g, (_, target: string, alias?: string) =>
+      alias === undefined ? target : matched(target) ? `${alias}（${target}）` : alias,
+    )
+    .replace(/\[([^\]]*)\]\(([^)]*)\)/g, (_, label: string, url: string) => (matched(url) ? `${label} (${url})` : label))
     .replace(/(\*\*|__|~~|==|`)/g, "")
     .replace(/^\s*(#{1,6}\s+|[-*+]\s+(\[.\]\s+)?|\d+\.\s+|>\s*)/gm, "")
     .replace(/\s+/g, " ")
@@ -188,7 +207,8 @@ export function makeExcerpt(content: string, query: string, matchedTerms: string
     else while (from < at && WORD_CHAR.test(body[from - 1]) && WORD_CHAR.test(body[from])) from++;
     while (from < at && /[\s，、,:：）)」』]/.test(body[from])) from++;
   }
-  let text = cleanMarkdown(body.slice(from, at + EXCERPT_AFTER));
+  const needles = parts.flatMap((part) => needlesFor(part, matchedTerms).flat());
+  let text = cleanMarkdown(body.slice(from, at + EXCERPT_AFTER), needles);
   if (from > lineStart) text = "…" + text;
   return { text, ranges: findRanges(text, parts, matchedTerms), line };
 }

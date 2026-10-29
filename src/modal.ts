@@ -1,6 +1,6 @@
 import { App, Command, Hotkey, Keymap, Modal, Notice, Platform, Scope, TFile, setIcon } from "obsidian";
-import { CommandIndex, CommandMatch } from "./commands";
-import { SearchResult, highlightRanges } from "./engine";
+import { CommandIndex, CommandMatch, isCommandAvailable } from "./commands";
+import { SearchResult, highlightRanges, highlightSegments } from "./engine";
 import type CrispSearchPlugin from "./main";
 
 const RECENT_LIMIT = 8;
@@ -60,13 +60,14 @@ function iconFor(file: TFile): string {
 }
 
 function renderHighlighted(el: HTMLElement, text: string, ranges: [number, number][]): void {
-  let at = 0;
-  for (const [start, end] of ranges) {
-    if (start > at) el.appendText(text.slice(at, start));
-    el.createEl("mark", { text: text.slice(start, end) });
-    at = end;
+  for (const segment of highlightSegments(text, ranges)) {
+    if (segment.mark) el.createEl("mark", { text: segment.text });
+    else el.appendText(segment.text);
   }
-  if (at < text.length) el.appendText(text.slice(at));
+}
+
+function itemKey(item: Item): string {
+  return item.type === "command" ? `command:${item.command.id}` : `file:${item.file.path}`;
 }
 
 function renderKeys(el: HTMLElement, keys: string[]): void {
@@ -192,9 +193,18 @@ export class LauncherModal extends Modal {
     if (this.escapeScope) this.app.keymap.popScope(this.escapeScope);
   }
 
+  // Progress refreshes file results but keeps the selection, and waits while the action menu is open.
   private onIndexProgress(): void {
     this.renderStatus();
-    if (this.input.value.trim() && !this.commandMode()) this.update();
+    if (this.actionsOpen || !this.input.value.trim() || this.commandMode()) return;
+    const selected = this.items[this.selected];
+    const scrollTop = this.listEl.scrollTop;
+    this.update();
+    const index = selected ? this.items.findIndex((item) => itemKey(item) === itemKey(selected)) : -1;
+    if (index > 0) {
+      this.listEl.scrollTop = scrollTop;
+      this.select(index, false);
+    }
   }
 
   private commandMode(): boolean {
@@ -288,20 +298,11 @@ export class LauncherModal extends Modal {
   // Only commands that can run right now, judged once per panel: the active note does not change while it is open.
   private availableCommands(): Map<string, Command> {
     if (this.commands) return this.commands;
-    const editor = this.app.workspace.activeEditor;
+    const context = this.app.workspace.activeEditor;
     const available = new Map<string, Command>();
     for (const command of this.plugin.listCommands()) {
       if (command.id.startsWith(`${this.plugin.manifest.id}:open`)) continue;
-      let ok = true;
-      try {
-        if (command.checkCallback) ok = command.checkCallback(true) !== false;
-        else if (command.editorCheckCallback) {
-          ok = !!editor?.editor && command.editorCheckCallback(true, editor.editor, editor) !== false;
-        } else if (command.editorCallback) ok = !!editor?.editor;
-      } catch {
-        ok = false;
-      }
-      if (ok) available.set(command.id, command);
+      if (isCommandAvailable(command, context)) available.set(command.id, command);
     }
     this.commands = available;
     return available;
@@ -434,10 +435,15 @@ export class LauncherModal extends Modal {
     else void this.openFile(item, mode);
   }
 
+  // Checked again at run time; only a command the host accepted goes into recent use.
   private runCommand(item: CommandItem): void {
+    const runnable = isCommandAvailable(item.command, this.app.workspace.activeEditor);
     this.close();
+    if (!runnable || !this.plugin.executeCommand(item.command.id)) {
+      new Notice("这个命令现在无法运行");
+      return;
+    }
     this.plugin.recordCommand(item.command.id);
-    this.plugin.executeCommand(item.command.id);
   }
 
   private copyCommandId(item: CommandItem): void {

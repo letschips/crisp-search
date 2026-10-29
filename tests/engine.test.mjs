@@ -18,7 +18,7 @@ await esbuild.build({
   outfile: path.join(outDir, "engine.mjs"),
   logLevel: "error",
 });
-const { SearchEngine, tokenizeText, makeExcerpt } = await import(pathToFileURL(path.join(outDir, "engine.mjs")).href);
+const { SearchEngine, tokenizeText, makeExcerpt, highlightSegments } = await import(pathToFileURL(path.join(outDir, "engine.mjs")).href);
 
 function doc(p, content = "", extra = {}) {
   const basename = p.split("/").pop().replace(/\.[^.]+$/, "");
@@ -183,4 +183,21 @@ test("a title hit found through an alias shows the alias, not a bare file name",
   assert.equal(hit.kind, "title");
   assert.equal(hit.line, undefined);
   assert.deepEqual(hit.excerpt.ranges.map(([s, e]) => hit.excerpt.text.slice(s, e)), ["设置"]);
+});
+
+// R2-4: cleaning [[target|alias]] down to the alias deleted the only matched word.
+test("a match inside a link target stays visible in the excerpt", () => {
+  const wiki = makeExcerpt("prefix\n\n[[uniquemarker|显示文字]]", "uniquemarker");
+  assert.equal(wiki.line, 2);
+  assert.deepEqual(wiki.ranges.map(([s, e]) => wiki.text.slice(s, e)), ["uniquemarker"]);
+  assert.ok(wiki.text.includes("显示文字"));
+  const md = makeExcerpt("see [the docs](https://example.com/launchpad-guide) here", "launchpad");
+  assert.deepEqual(md.ranges.map(([s, e]) => md.text.slice(s, e)), ["launchpad"]);
+  const plain = makeExcerpt("[[other|显示文字]] 里的 uniquemarker", "uniquemarker");
+  assert.ok(!plain.text.includes("other"), plain.text);
+});
+
+test("highlight segments never repeat text, even for overlapping ranges", () => {
+  const segments = highlightSegments("切换行号", [[0, 2], [0, 2], [1, 3]]);
+  assert.equal(segments.map((s) => s.text).join(""), "切换行号");
 });

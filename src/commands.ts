@@ -1,4 +1,21 @@
+import type { Command, MarkdownFileInfo } from "obsidian";
 import { pinyinKeys } from "./engine";
+
+type CommandCallbacks = Pick<Command, "callback" | "checkCallback" | "editorCallback" | "editorCheckCallback">;
+
+// The SDK's order: editor callbacks override checkCallback, which overrides callback. A check that
+// returns false or undefined hides the command.
+export function isCommandAvailable(command: CommandCallbacks, context: MarkdownFileInfo | null): boolean {
+  const editor = context?.editor;
+  try {
+    if (command.editorCheckCallback) return !!editor && !!command.editorCheckCallback(true, editor, context!);
+    if (command.editorCallback) return !!editor;
+    if (command.checkCallback) return !!command.checkCallback(true);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export interface CommandEntry {
   id: string;
@@ -17,7 +34,8 @@ interface PreparedCommand extends CommandEntry {
 }
 
 const WORD_BOUNDARY = /[\s:：\-_/（(]/;
-const RECENT_BOOST = 1.5;
+// Typing the whole name must win over anything recent use can add.
+const EXACT_BONUS = 10;
 
 function prepare(entry: CommandEntry): PreparedCommand {
   const lower = entry.name.toLowerCase();
@@ -37,6 +55,16 @@ function scorePart(command: PreparedCommand, part: string, ranges: [number, numb
   return command.initials.includes(part) ? 1 : 0;
 }
 
+function mergeRanges(ranges: [number, number][]): [number, number][] {
+  const merged: [number, number][] = [];
+  for (const range of [...ranges].sort((a, b) => a[0] - b[0])) {
+    const last = merged[merged.length - 1];
+    if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1]);
+    else merged.push([range[0], range[1]]);
+  }
+  return merged;
+}
+
 export class CommandIndex {
   private readonly commands: PreparedCommand[];
 
@@ -45,7 +73,7 @@ export class CommandIndex {
   }
 
   search(query: string, recent: string[] = []): CommandMatch[] {
-    const parts = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const parts = [...new Set(query.trim().toLowerCase().split(/\s+/).filter(Boolean))];
     const recency = (id: string) => {
       const at = recent.indexOf(id);
       return at === -1 ? 0 : 1 - at / recent.length;
@@ -63,11 +91,16 @@ export class CommandIndex {
         score += partScore;
       }
       if (score < 0) continue;
-      ranges.sort((a, b) => a[0] - b[0]);
-      matches.push({ id: command.id, name: command.name, score: score + recency(command.id) * RECENT_BOOST, ranges });
+      if (parts.length && command.lower === parts.join(" ")) score += EXACT_BONUS;
+      matches.push({ id: command.id, name: command.name, score, ranges: mergeRanges(ranges) });
     }
+    // Recent use orders commands that match equally well; it never lifts a weaker match.
     return matches.sort(
-      (a, b) => b.score - a.score || a.name.length - b.name.length || a.name.localeCompare(b.name, "zh"),
+      (a, b) =>
+        b.score - a.score ||
+        recency(b.id) - recency(a.id) ||
+        a.name.length - b.name.length ||
+        a.name.localeCompare(b.name, "zh"),
     );
   }
 }
