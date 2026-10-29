@@ -1,4 +1,4 @@
-import { App, Command, Hotkey, Keymap, Modal, Notice, Platform, Scope, TFile, setIcon } from "obsidian";
+import { App, Command, Hotkey, Keymap, Menu, Modal, Notice, Platform, Scope, TFile, setIcon } from "obsidian";
 import { CommandIndex, CommandMatch, isCommandAvailable } from "./commands";
 import { Excerpt, MAX_HITS, SearchResult, highlightRanges, highlightSegments } from "./engine";
 import type CrispSearchPlugin from "./main";
@@ -34,6 +34,8 @@ interface Action<T extends Item = Item> {
   icon: string;
   keys: string[];
   run: (item: T) => void;
+  // Opens the right-click menu, so it is left out of that menu itself.
+  more?: boolean;
 }
 
 const MOD = Platform.isMacOS ? "⌘" : "Ctrl";
@@ -192,6 +194,14 @@ export class LauncherModal extends Modal {
       if (first) return;
       const index = this.rowIndexOf(evt.target);
       if (index !== -1 && index !== this.selected) this.select(index, false);
+    });
+    this.listEl.addEventListener("contextmenu", (evt) => {
+      const index = this.rowIndexOf(evt.target);
+      if (index === -1) return;
+      evt.preventDefault();
+      this.toggleActions(false);
+      this.select(index, false);
+      this.showItemMenu(this.items[index], (menu) => menu.showAtMouseEvent(evt));
     });
     this.listEl.addEventListener("click", (evt) => {
       const target = evt.target instanceof HTMLElement ? evt.target : null;
@@ -563,14 +573,45 @@ export class LauncherModal extends Modal {
   private actionsFor(item: Item | undefined): Action[] {
     if (!item) return [];
     if (item.type === "command") return this.commandActions as Action[];
-    if (!hasMoreHits(item)) return this.fileActions as Action[];
+    const more: Action<FileItem> = { label: "更多操作…", icon: "more-horizontal", keys: [], more: true, run: () => this.showMenuAtRow() };
+    if (!hasMoreHits(item)) return [...this.fileActions, more] as Action[];
     const hits: Action<FileItem> = {
       label: item.result!.hitCount! > MAX_HITS ? `查看前 ${MAX_HITS} 行命中` : `查看全部 ${item.result!.hitCount} 行命中`,
       icon: "list",
       keys: ["→"],
       run: () => this.enterHits(),
     };
-    return [...this.fileActions, hits] as Action[];
+    return [...this.fileActions, hits, more] as Action[];
+  }
+
+  // Right-click menu: this panel's own actions first, then the note menu Obsidian and other plugins build
+  // for any file (reveal in Finder, copy path, bookmark, move…), the same one the file list shows.
+  private showItemMenu(item: Item, show: (menu: Menu) => void): void {
+    const menu = new Menu();
+    for (const action of this.actionsFor(item)) {
+      if (action.more) continue;
+      // Obsidian orders menu items by section; "title" comes before its own open/copy/system groups.
+      menu.addItem((menuItem) =>
+        menuItem.setTitle(action.label).setIcon(action.icon).setSection("title").onClick(() => action.run(item)),
+      );
+    }
+    if (item.type === "file") {
+      menu.addSeparator();
+      this.app.workspace.trigger("file-menu", menu, item.file, "crisp-search", null);
+      // Obsidian's own entries that open the note would leave the panel over it; close it when one does.
+      const ref = this.app.workspace.on("file-open", () => this.close());
+      menu.onHide(() => this.app.workspace.offref(ref));
+    }
+    show(menu);
+  }
+
+  private showMenuAtRow(): void {
+    const item = this.items[this.selected];
+    const row = this.rows[this.selected];
+    if (!item || !row) return;
+    this.toggleActions(false);
+    const rect = row.getBoundingClientRect();
+    this.showItemMenu(item, (menu) => menu.showAtPosition({ x: rect.right - 16, y: rect.bottom }, row.doc));
   }
 
   private renderActions(): void {

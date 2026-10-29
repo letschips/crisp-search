@@ -26,6 +26,7 @@ export class TFile extends TAbstractFile {
   }
 }
 export class Modal {}
+export class Menu {}
 export class PluginSettingTab {
   constructor(app, plugin) {
     this.app = app;
