@@ -59,6 +59,7 @@ export class LauncherModal extends Modal {
   private selected = 0;
   private actionIndex = 0;
   private actionsOpen = false;
+  private pointer = { x: -1, y: -1 };
   private stopProgress: (() => void) | null = null;
   private readonly actions: Action[];
 
@@ -110,6 +111,11 @@ export class LauncherModal extends Modal {
     this.input.addEventListener("compositionend", () => this.update());
     this.input.addEventListener("keydown", (evt) => this.onKeyDown(evt));
     this.listEl.addEventListener("mousemove", (evt) => {
+      // Chromium replays mousemove when rows re-render under a still pointer; only real movement selects.
+      const first = this.pointer.x === -1;
+      if (evt.screenX === this.pointer.x && evt.screenY === this.pointer.y) return;
+      this.pointer = { x: evt.screenX, y: evt.screenY };
+      if (first) return;
       const index = this.rowIndexOf(evt.target);
       if (index !== -1 && index !== this.selected) this.select(index, false);
     });
