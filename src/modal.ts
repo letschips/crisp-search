@@ -263,7 +263,7 @@ export class LauncherModal extends Modal {
     const scrollTop = this.listEl.scrollTop;
     this.update();
     const index = selected ? this.items.findIndex((item) => itemKey(item) === itemKey(selected)) : -1;
-    if (index > 0) {
+    if (index >= 0) {
       this.listEl.scrollTop = scrollTop;
       this.select(index, false);
     }

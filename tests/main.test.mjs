@@ -240,3 +240,29 @@ test("activation starts indexing, and losing the licence clears the index", asyn
   for (let i = 0; i < 20 && !plugin.ready; i++) await new Promise((r) => setImmediate(r));
   assert.equal(plugin.engine.size, 3);
 });
+
+// 0.1.4: a read that is still in flight when the index stops, the plugin unloads or the file becomes
+// excluded must not write the file back into the index.
+for (const scenario of ["stop", "unload", "exclude"]) {
+  test(`a pending read after ${scenario} leaves the index empty`, async () => {
+    const reads = [];
+    let excluded = false;
+    const { plugin, files, events } = await setup({
+      ignored: (p) => excluded && p === "a.md",
+      read: () => {
+        const d = deferred();
+        reads.push(d);
+        return d.promise;
+      },
+    });
+    plugin.settingTab = null;
+    plugin.indexStarted = true;
+    events["vault:create"](files[0]);
+    if (scenario === "stop") plugin.stopIndex();
+    if (scenario === "unload") plugin.onunload();
+    if (scenario === "exclude") excluded = true;
+    for (const d of reads) d.resolve("latemarker");
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(plugin.engine.size, 0);
+  });
+}

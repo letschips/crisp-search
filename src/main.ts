@@ -140,6 +140,7 @@ export default class CrispSearchPlugin extends Plugin {
 
   onunload(): void {
     this.unloaded = true;
+    this.stopIndex();
     this.licenseController.dispose();
     this.progressListeners.clear();
   }
@@ -224,6 +225,7 @@ export default class CrispSearchPlugin extends Plugin {
     this.total = 0;
     for (const path of this.engine.paths()) this.engine.remove(path);
     this.failures.clear();
+    this.versions.clear();
   }
 
   // loadData() yields undefined when data.json exists but cannot be read; keep a copy before defaults take over.
@@ -384,8 +386,10 @@ export default class CrispSearchPlugin extends Plugin {
   private async indexFile(file: TFile, current: () => boolean = () => true): Promise<void> {
     // The TFile is renamed in place, so the path is fixed now: after a rename this read belongs to no one.
     const path = file.path;
+    const generation = this.generation;
     const version = this.bump(path);
-    const fresh = () => current() && file.path === path && this.versions.get(path) === version;
+    const fresh = () => !this.unloaded && generation === this.generation && current() &&
+      file.path === path && this.versions.get(path) === version;
     if (this.isIgnored(file.path)) {
       this.engine.remove(file.path);
       return;
@@ -403,6 +407,11 @@ export default class CrispSearchPlugin extends Plugin {
     }
     // A newer pass or event has written this path, or the file was deleted while it was being read.
     if (!fresh() || this.app.vault.getAbstractFileByPath(path) !== file) return;
+    // Exclusions can change while cachedRead is in flight.
+    if (this.isIgnored(path)) {
+      this.removePath(path);
+      return;
+    }
     this.upsert(file, content, this.app.metadataCache.getFileCache(file));
   }
 

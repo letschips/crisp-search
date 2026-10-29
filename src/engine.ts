@@ -151,11 +151,30 @@ function needleLevels(part: string, matchedTerms: string[]): string[][] {
   return [[part.toLowerCase()], tokens, fuzzy];
 }
 
-function findRanges(text: string, parts: string[], matchedTerms: string[] = []): [number, number][] {
+interface PreparedPart {
+  exact: string;
+  tokens: string[][];
+  levels: string[][];
+}
+
+// Fuzzy candidates depend on the query and index match, never on the line being scanned.
+function prepareParts(parts: string[], matchedTerms: string[]): PreparedPart[] {
+  return parts.map((part) => {
+    const tokens = tokenizeText(part);
+    const alternatives = tokens.map((token) => [token, ...(!isCjk(token) ? termsForToken(token, matchedTerms) : [])]);
+    return {
+      exact: part.toLowerCase(),
+      tokens: alternatives,
+      levels: [[part.toLowerCase()], tokens, alternatives.flatMap((terms) => terms.slice(1))],
+    };
+  });
+}
+
+function findPreparedRanges(text: string, parts: PreparedPart[]): [number, number][] {
   const lower = text.toLowerCase();
   const ranges: [number, number][] = [];
   for (const part of parts) {
-    for (const needles of needleLevels(part, matchedTerms)) {
+    for (const needles of part.levels) {
       const before = ranges.length;
       for (const needle of needles) {
         for (const at of occurrences(lower, needle)) ranges.push([at, at + needle.length]);
@@ -173,15 +192,24 @@ function findRanges(text: string, parts: string[], matchedTerms: string[] = []):
   return merged;
 }
 
+function findRanges(text: string, parts: string[], matchedTerms: string[] = []): [number, number][] {
+  return findPreparedRanges(text, prepareParts(parts, matchedTerms));
+}
+
+// Existence checks stop at the first occurrence instead of allocating every match on a long line.
+function hasOccurrence(lower: string, needle: string): boolean {
+  const latin = !isCjk(needle);
+  for (let at = lower.indexOf(needle); at !== -1; at = lower.indexOf(needle, at + 1)) {
+    if (!latin || at === 0 || !LATIN_WORD_CHAR.test(lower[at - 1])) return true;
+  }
+  return false;
+}
+
 // A line answers a query word when it holds the word, or every token of it: Chinese tokens anywhere,
 // English tokens at a word start or as one of the fuzzy terms that matched that token.
-function lineHolds(lowerLine: string, part: string, matchedTerms: string[]): boolean {
-  if (occurrences(lowerLine, part.toLowerCase()).length) return true;
-  return tokenizeText(part).every(
-    (token) =>
-      occurrences(lowerLine, token).length > 0 ||
-      (!isCjk(token) && termsForToken(token, matchedTerms).some((term) => occurrences(lowerLine, term).length > 0)),
-  );
+function lineHolds(lowerLine: string, part: PreparedPart): boolean {
+  return hasOccurrence(lowerLine, part.exact) ||
+    part.tokens.every((alternatives) => alternatives.some((term) => hasOccurrence(lowerLine, term)));
 }
 
 export function highlightRanges(text: string, query: string): [number, number][] {
@@ -234,11 +262,12 @@ function lineAt(text: string, offset: number): number {
 // Offsets of the first match on each body line that answers every query word, in note order.
 function hitStarts(body: string, parts: string[], matchedTerms: string[], limit: number): number[] {
   const starts: number[] = [];
+  const prepared = prepareParts(parts, matchedTerms);
   let offset = 0;
   for (const line of body.split("\n")) {
     const lower = line.toLowerCase();
-    if (lower.trim() && parts.every((part) => lineHolds(lower, part, matchedTerms))) {
-      starts.push(offset + (findRanges(line, parts, matchedTerms)[0]?.[0] ?? 0));
+    if (lower.trim() && prepared.every((part) => lineHolds(lower, part))) {
+      starts.push(offset + (findPreparedRanges(line, prepared)[0]?.[0] ?? 0));
       if (starts.length >= limit) break;
     }
     offset += line.length + 1;
@@ -280,15 +309,19 @@ function excerptAt(body: string, at: number, line: number, parts: string[], matc
 export function makeExcerpt(content: string, query: string, matchedTerms: string[] = []): Excerpt {
   const parts = queryParts(query);
   const { frontmatter, body } = splitFrontmatter(content);
+  return excerptForMatch(frontmatter, body, parts, matchedTerms, hitStarts(body, parts, matchedTerms, 1));
+}
+
+function excerptForMatch(frontmatter: string, body: string, parts: string[], matchedTerms: string[], starts: number[]): Excerpt {
   // Words scattered over several lines still found the note; then show where the first of them is.
-  const at = hitStarts(body, parts, matchedTerms, 1)[0] ?? findRanges(body, parts, matchedTerms)[0]?.[0];
+  const at = starts[0] ?? findRanges(body, parts, matchedTerms)[0]?.[0];
   if (at === undefined) {
     // Only a property matched: show that property line rather than unrelated body text.
     const property = propertyExcerpt(frontmatter, parts, matchedTerms);
     if (property) return property;
   }
   const offset = at ?? 0;
-  return excerptAt(body, offset, lineAt(content, frontmatter.length + offset), parts, matchedTerms);
+  return excerptAt(body, offset, lineAt(frontmatter, frontmatter.length) + lineAt(body, offset), parts, matchedTerms);
 }
 
 export const MAX_HITS = 50;
@@ -417,7 +450,10 @@ export class SearchEngine {
       let score = hit.score;
       if (title === lowerParts.join(" ")) score *= 3;
       else if (lowerParts.every((p) => title.includes(p))) score *= 2;
-      else if (lowerParts.every((p) => doc.content.toLowerCase().includes(p))) score *= 1.5;
+      else {
+        const lowerContent = doc.content.toLowerCase();
+        if (lowerParts.every((p) => lowerContent.includes(p))) score *= 1.5;
+      }
       results.push({ path: doc.path, basename: doc.basename, extension: doc.extension, kind, score, terms: hit.terms });
     }
     results.sort((a, b) => b.score - a.score);
@@ -435,14 +471,17 @@ export class SearchEngine {
       }
       const terms = result.terms ?? [];
       const bodyQuery = this.bodyQuery(doc.path, parts);
-      result.excerpt = makeExcerpt(doc.content, bodyQuery, terms);
-      // Counted one past the cap, so the panel can tell "50" from "more than 50".
-      result.hitCount = Math.max(1, hitStarts(splitFrontmatter(doc.content).body, queryParts(bodyQuery), terms, MAX_HITS + 1).length);
-      // A heading is the place to open only when it answers the whole query; otherwise the excerpt is.
       const lineParts = queryParts(bodyQuery);
+      const { frontmatter, body } = splitFrontmatter(doc.content);
+      const starts = hitStarts(body, lineParts, terms, MAX_HITS + 1);
+      result.excerpt = excerptForMatch(frontmatter, body, lineParts, terms, starts);
+      // Counted one past the cap, so the panel can tell "50" from "more than 50".
+      result.hitCount = Math.max(1, starts.length);
+      // A heading is the place to open only when it answers the whole query; otherwise the excerpt is.
+      const prepared = prepareParts(lineParts, terms);
       const heading =
         result.kind === "heading"
-          ? doc.headings.find((h) => lineParts.every((part) => lineHolds(h.text.toLowerCase(), part, terms)))
+          ? doc.headings.find((h) => prepared.every((part) => lineHolds(h.text.toLowerCase(), part)))
           : undefined;
       result.line = heading ? heading.line : result.excerpt.line;
     }
