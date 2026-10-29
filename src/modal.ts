@@ -1,26 +1,50 @@
-import { App, Keymap, Modal, Notice, Platform, Scope, TFile, setIcon } from "obsidian";
+import { App, Command, Hotkey, Keymap, Modal, Notice, Platform, Scope, TFile, setIcon } from "obsidian";
+import { CommandIndex, CommandMatch } from "./commands";
 import { SearchResult, highlightRanges } from "./engine";
 import type CrispSearchPlugin from "./main";
 
 const RECENT_LIMIT = 8;
+// Commands shown among note results; the ">" prefix lists all of them.
+const MIXED_COMMAND_LIMIT = 4;
+const COMMAND_PREFIX = /^[>》]/;
 let instanceCount = 0;
 
 type OpenMode = "current" | "tab" | "split";
 
-interface Item {
+interface FileItem {
+  type: "file";
+  section: string;
   file: TFile;
   result?: SearchResult;
 }
 
-interface Action {
+interface CommandItem {
+  type: "command";
+  section: string;
+  command: Command;
+  match: CommandMatch;
+}
+
+type Item = FileItem | CommandItem;
+
+interface Action<T extends Item = Item> {
   label: string;
   icon: string;
   keys: string[];
-  run: (item: Item) => void;
+  run: (item: T) => void;
 }
 
 const MOD = Platform.isMacOS ? "⌘" : "Ctrl";
 const ALT = Platform.isMacOS ? "⌥" : "Alt";
+const MODIFIER_KEYS: Record<string, string> = Platform.isMacOS
+  ? { Mod: "⌘", Ctrl: "⌃", Meta: "⌘", Alt: "⌥", Shift: "⇧" }
+  : { Mod: "Ctrl", Ctrl: "Ctrl", Meta: "Win", Alt: "Alt", Shift: "Shift" };
+const KEY_NAMES: Record<string, string> = { ArrowUp: "↑", ArrowDown: "↓", ArrowLeft: "←", ArrowRight: "→", Enter: "↵", " ": "Space" };
+
+function hotkeyKeys(hotkey: Hotkey): string[] {
+  const key = KEY_NAMES[hotkey.key] ?? (hotkey.key.length === 1 ? hotkey.key.toUpperCase() : hotkey.key);
+  return [...hotkey.modifiers.map((m) => MODIFIER_KEYS[m] ?? m), key];
+}
 
 const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "heic"]);
 
@@ -64,16 +88,24 @@ export class LauncherModal extends Modal {
   private stopProgress: (() => void) | null = null;
   private escapeScope: Scope | null = null;
   private idPrefix = "";
-  private readonly actions: Action[];
+  private readonly fileActions: Action<FileItem>[];
+  private readonly commandActions: Action<CommandItem>[];
+  private primaryLabel: HTMLElement | null = null;
+  private commands: Map<string, Command> | null = null;
+  private commandIndex: CommandIndex | null = null;
 
   constructor(app: App, plugin: CrispSearchPlugin) {
     super(app);
     this.plugin = plugin;
-    this.actions = [
-      { label: "打开", icon: "file-input", keys: ["↵"], run: (item) => void this.openItem(item, "current") },
-      { label: "在新标签页打开", icon: "plus-square", keys: [MOD, "↵"], run: (item) => void this.openItem(item, "tab") },
-      { label: "在右侧打开", icon: "columns-2", keys: [MOD, ALT, "↵"], run: (item) => void this.openItem(item, "split") },
+    this.fileActions = [
+      { label: "打开", icon: "file-input", keys: ["↵"], run: (item) => void this.openFile(item, "current") },
+      { label: "在新标签页打开", icon: "plus-square", keys: [MOD, "↵"], run: (item) => void this.openFile(item, "tab") },
+      { label: "在右侧打开", icon: "columns-2", keys: [MOD, ALT, "↵"], run: (item) => void this.openFile(item, "split") },
       { label: "复制链接", icon: "link", keys: [], run: (item) => this.copyLink(item) },
+    ];
+    this.commandActions = [
+      { label: "运行", icon: "play", keys: ["↵"], run: (item) => this.runCommand(item) },
+      { label: "复制命令 ID", icon: "copy", keys: [], run: (item) => this.copyCommandId(item) },
     ];
   }
 
@@ -89,11 +121,11 @@ export class LauncherModal extends Modal {
       cls: "crisp-search-input",
       type: "text",
       attr: {
-        placeholder: "搜索笔记和内容…",
+        placeholder: "搜索笔记、内容和命令…",
         spellcheck: "false",
         enterkeyhint: "go",
         role: "combobox",
-        "aria-label": "搜索笔记和内容",
+        "aria-label": "搜索笔记、内容和命令",
         "aria-expanded": "true",
         "aria-autocomplete": "list",
         "aria-controls": `${this.idPrefix}-list`,
@@ -106,7 +138,7 @@ export class LauncherModal extends Modal {
     if (!Platform.isMobile) {
       const footer = this.modalEl.createDiv("crisp-search-footer");
       const open = footer.createDiv("crisp-search-footer-action");
-      open.createSpan({ text: "打开" });
+      this.primaryLabel = open.createSpan({ text: "打开" });
       renderKeys(open, ["↵"]);
       open.addEventListener("click", () => this.runAction(0));
       const more = footer.createDiv("crisp-search-footer-action");
@@ -135,7 +167,7 @@ export class LauncherModal extends Modal {
       const index = this.rowIndexOf(evt.target);
       if (index === -1) return;
       this.select(index, false);
-      void this.openItem(this.items[index], this.modeFor(evt));
+      this.activate(this.items[index], this.modeFor(evt));
     });
 
     // The modal's own scope closes on Escape before the field sees the key, so a child scope on top
@@ -162,7 +194,11 @@ export class LauncherModal extends Modal {
 
   private onIndexProgress(): void {
     this.renderStatus();
-    if (this.input.value.trim()) this.update();
+    if (this.input.value.trim() && !this.commandMode()) this.update();
+  }
+
+  private commandMode(): boolean {
+    return COMMAND_PREFIX.test(this.input.value.trimStart());
   }
 
   private renderStatus(): void {
@@ -189,7 +225,8 @@ export class LauncherModal extends Modal {
       if (evt.key === "ArrowDown" || evt.key === "ArrowUp") {
         evt.preventDefault();
         const step = evt.key === "ArrowDown" ? 1 : -1;
-        this.actionIndex = (this.actionIndex + step + this.actions.length) % this.actions.length;
+        const count = this.actionsFor(this.items[this.selected]).length;
+        this.actionIndex = (this.actionIndex + step + count) % count;
         this.renderActions();
       } else if (evt.key === "Enter") {
         evt.preventDefault();
@@ -206,7 +243,7 @@ export class LauncherModal extends Modal {
     } else if (evt.key === "Enter") {
       evt.preventDefault();
       const item = this.items[this.selected];
-      if (item) void this.openItem(item, this.modeFor(evt));
+      if (item) this.activate(item, this.modeFor(evt));
     }
   }
 
@@ -216,18 +253,21 @@ export class LauncherModal extends Modal {
   }
 
   private update(): void {
-    const query = this.input.value.trim();
+    const raw = this.input.value.trimStart();
+    const commandMode = COMMAND_PREFIX.test(raw);
+    const query = (commandMode ? raw.slice(1) : raw).trim();
     this.toggleActions(false);
-    this.items = query ? this.searchItems(query) : this.recentItems();
+    if (commandMode) this.items = this.commandItems(query, Infinity);
+    else this.items = query ? this.searchItems(query) : this.recentItems();
     this.selected = 0;
-    this.render(query);
+    this.render(query, commandMode);
   }
 
   private recentItems(): Item[] {
     const items: Item[] = [];
     for (const path of this.app.workspace.getLastOpenFiles()) {
       const file = this.app.vault.getAbstractFileByPath(path);
-      if (file instanceof TFile && !this.plugin.isIgnored(file.path)) items.push({ file });
+      if (file instanceof TFile && !this.plugin.isIgnored(file.path)) items.push({ type: "file", section: "最近", file });
       if (items.length >= RECENT_LIMIT) break;
     }
     return items;
@@ -239,39 +279,91 @@ export class LauncherModal extends Modal {
     for (const result of this.plugin.engine.search(query)) {
       const file = this.app.vault.getAbstractFileByPath(result.path);
       if (!(file instanceof TFile)) continue;
-      (result.kind === "title" ? titles : bodies).push({ file, result });
+      if (result.kind === "title") titles.push({ type: "file", section: "笔记", file, result });
+      else bodies.push({ type: "file", section: "内容", file, result });
     }
-    return [...titles, ...bodies];
+    return [...titles, ...this.commandItems(query, MIXED_COMMAND_LIMIT), ...bodies];
   }
 
-  private render(query: string): void {
+  // Only commands that can run right now, judged once per panel: the active note does not change while it is open.
+  private availableCommands(): Map<string, Command> {
+    if (this.commands) return this.commands;
+    const editor = this.app.workspace.activeEditor;
+    const available = new Map<string, Command>();
+    for (const command of this.plugin.listCommands()) {
+      if (command.id.startsWith(`${this.plugin.manifest.id}:open`)) continue;
+      let ok = true;
+      try {
+        if (command.checkCallback) ok = command.checkCallback(true) !== false;
+        else if (command.editorCheckCallback) {
+          ok = !!editor?.editor && command.editorCheckCallback(true, editor.editor, editor) !== false;
+        } else if (command.editorCallback) ok = !!editor?.editor;
+      } catch {
+        ok = false;
+      }
+      if (ok) available.set(command.id, command);
+    }
+    this.commands = available;
+    return available;
+  }
+
+  private commandItems(query: string, limit: number): Item[] {
+    const commands = this.availableCommands();
+    this.commandIndex ??= new CommandIndex([...commands.values()].map(({ id, name }) => ({ id, name })));
+    const recent = this.plugin.recentCommands;
+    const items: Item[] = [];
+    for (const match of this.commandIndex.search(query, recent)) {
+      if (items.length >= limit) break;
+      const section = !query && recent.includes(match.id) ? "最近使用" : "命令";
+      items.push({ type: "command", section, command: commands.get(match.id)!, match });
+    }
+    return items;
+  }
+
+  private render(query: string, commandMode: boolean): void {
     this.listEl.empty();
     this.rows = [];
     this.input.removeAttribute("aria-activedescendant");
     this.listEl.scrollTop = 0;
     if (this.items.length === 0) {
-      if (query) this.listEl.createDiv({ cls: "crisp-search-empty", text: this.plugin.ready ? "没有结果" : "正在建立索引…" });
+      if (query || commandMode) {
+        const text = commandMode || this.plugin.ready ? "没有结果" : "正在建立索引…";
+        this.listEl.createDiv({ cls: "crisp-search-empty", text });
+      }
       return;
     }
     let section = "";
     this.items.forEach((item, index) => {
-      const heading = !query ? "最近" : item.result?.kind === "title" ? "笔记" : "内容";
-      if (heading !== section) {
-        section = heading;
-        this.listEl.createDiv({ cls: "crisp-search-section", text: heading });
+      if (item.section !== section) {
+        section = item.section;
+        this.listEl.createDiv({ cls: "crisp-search-section", text: section });
       }
-      this.rows.push(this.renderRow(item, index, query));
+      this.rows.push(item.type === "file" ? this.renderFileRow(item, index, query) : this.renderCommandRow(item, index));
     });
     this.select(0);
   }
 
-  private renderRow(item: Item, index: number, query: string): HTMLElement {
-    const { file, result } = item;
+  private createRow(index: number, icon: string): HTMLElement {
     const row = this.listEl.createDiv({
       cls: "crisp-search-item",
       attr: { id: `${this.idPrefix}-option-${index}`, role: "option", "aria-selected": "false", "data-index": String(index) },
     });
-    setIcon(row.createDiv("crisp-search-item-icon"), iconFor(file));
+    setIcon(row.createDiv("crisp-search-item-icon"), icon);
+    return row;
+  }
+
+  private renderCommandRow(item: CommandItem, index: number): HTMLElement {
+    const row = this.createRow(index, item.command.icon ?? "terminal-square");
+    const title = row.createDiv("crisp-search-item-text").createSpan("crisp-search-item-title");
+    renderHighlighted(title, item.match.name, item.match.ranges);
+    const hotkey = this.plugin.hotkeysFor(item.command.id)[0];
+    if (hotkey) renderKeys(row.createDiv("crisp-search-item-hotkey"), hotkeyKeys(hotkey));
+    return row;
+  }
+
+  private renderFileRow(item: FileItem, index: number, query: string): HTMLElement {
+    const { file, result } = item;
+    const row = this.createRow(index, iconFor(file));
     const text = row.createDiv("crisp-search-item-text");
     const title = text.createSpan("crisp-search-item-title");
     renderHighlighted(title, file.basename, query ? highlightRanges(file.basename, query) : []);
@@ -299,6 +391,7 @@ export class LauncherModal extends Modal {
     row.setAttr("aria-selected", "true");
     this.input.setAttr("aria-activedescendant", row.id);
     if (scroll) row.scrollIntoView({ block: "nearest" });
+    this.primaryLabel?.setText(this.items[index].type === "command" ? "运行" : "打开");
   }
 
   private toggleActions(open = !this.actionsOpen): void {
@@ -309,9 +402,14 @@ export class LauncherModal extends Modal {
     if (open) this.renderActions();
   }
 
+  private actionsFor(item: Item | undefined): Action[] {
+    if (!item) return [];
+    return (item.type === "command" ? this.commandActions : this.fileActions) as Action[];
+  }
+
   private renderActions(): void {
     this.actionsEl.empty();
-    this.actions.forEach((action, index) => {
+    this.actionsFor(this.items[this.selected]).forEach((action, index) => {
       const row = this.actionsEl.createDiv({ cls: "crisp-search-action" });
       row.toggleClass("is-selected", index === this.actionIndex);
       setIcon(row.createSpan("crisp-search-action-icon"), action.icon);
@@ -328,10 +426,29 @@ export class LauncherModal extends Modal {
 
   private runAction(index: number): void {
     const item = this.items[this.selected];
-    if (item) this.actions[index].run(item);
+    if (item) this.actionsFor(item)[index]?.run(item);
   }
 
-  private async openItem(item: Item, mode: OpenMode): Promise<void> {
+  private activate(item: Item, mode: OpenMode): void {
+    if (item.type === "command") this.runCommand(item);
+    else void this.openFile(item, mode);
+  }
+
+  private runCommand(item: CommandItem): void {
+    this.close();
+    this.plugin.recordCommand(item.command.id);
+    this.plugin.executeCommand(item.command.id);
+  }
+
+  private copyCommandId(item: CommandItem): void {
+    void navigator.clipboard.writeText(item.command.id).then(
+      () => new Notice("已复制命令 ID"),
+      () => new Notice("复制失败"),
+    );
+    this.close();
+  }
+
+  private async openFile(item: FileItem, mode: OpenMode): Promise<void> {
     this.close();
     const workspace = this.app.workspace;
     const leaf = mode === "split" ? workspace.getLeaf("split", "vertical") : workspace.getLeaf(mode === "tab" ? "tab" : false);
@@ -339,7 +456,7 @@ export class LauncherModal extends Modal {
     await leaf.openFile(item.file, { active: true, eState: line !== undefined ? { line } : undefined });
   }
 
-  private copyLink(item: Item): void {
+  private copyLink(item: FileItem): void {
     const link = this.app.fileManager.generateMarkdownLink(item.file, "");
     void navigator.clipboard.writeText(link).then(
       () => new Notice("已复制链接"),

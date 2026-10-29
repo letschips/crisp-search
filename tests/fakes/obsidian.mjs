@@ -9,6 +9,10 @@ export class Plugin {
     this.commands.push(command);
   }
   addRibbonIcon() {}
+  async loadData() {
+    return null;
+  }
+  async saveData() {}
 }
 export class TAbstractFile {}
 export class TFile extends TAbstractFile {

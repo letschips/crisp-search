@@ -22,7 +22,10 @@ await esbuild.build({
 });
 const { default: CrispSearchPlugin } = await import(pathToFileURL(path.join(outDir, "main.mjs")).href);
 
-function setup({ fail = () => false, ignored = () => false } = {}) {
+async function setup(options = {}) {
+  const { fail = () => false, ignored = () => false } = options;
+  // Passed explicitly as undefined to mean "data.json exists but could not be read".
+  const data = "data" in options ? options.data : null;
   const files = ["a.md", "bad.md", "z.md"].map((p) => new TFile(p));
   const events = {};
   const app = {
@@ -39,12 +42,15 @@ function setup({ fail = () => false, ignored = () => false } = {}) {
     metadataCache: { on: (name, fn) => (events[`cache:${name}`] = fn), isUserIgnored: ignored, getFileCache: () => null },
   };
   const plugin = new CrispSearchPlugin(app);
-  plugin.onload();
+  plugin.saved = [];
+  plugin.loadData = async () => data;
+  plugin.saveData = async (value) => plugin.saved.push(value);
+  await plugin.onload();
   return { plugin, files, events };
 }
 
 test("a file that cannot be read is counted as failed and indexing still finishes", async () => {
-  const { plugin } = setup({ fail: (p) => p === "bad.md" });
+  const { plugin } = await setup({ fail: (p) => p === "bad.md" });
   await plugin.rebuildIndex();
   assert.equal(plugin.ready, true);
   assert.equal(plugin.engine.has("z.md"), true);
@@ -53,7 +59,7 @@ test("a file that cannot be read is counted as failed and indexing still finishe
 
 test("rebuilding retries files that failed before", async () => {
   let broken = true;
-  const { plugin } = setup({ fail: (p) => broken && p === "bad.md" });
+  const { plugin } = await setup({ fail: (p) => broken && p === "bad.md" });
   await plugin.rebuildIndex();
   broken = false;
   await plugin.rebuildIndex();
@@ -62,9 +68,23 @@ test("rebuilding retries files that failed before", async () => {
 });
 
 test("an excluded file stays out of the index when its metadata changes", async () => {
-  const { plugin, files, events } = setup({ ignored: (p) => p === "bad.md" });
+  const { plugin, files, events } = await setup({ ignored: (p) => p === "bad.md" });
   await plugin.rebuildIndex();
   events["cache:changed"](files[1], "secretmarker", null);
   assert.equal(plugin.engine.has("bad.md"), false);
   assert.deepEqual(plugin.engine.search("secretmarker"), []);
+});
+
+test("recent commands load from data.json and are saved most recent first", async () => {
+  const { plugin } = await setup({ data: { recentCommands: ["a:one", 3, "b:two"] } });
+  assert.deepEqual(plugin.recentCommands, ["a:one", "b:two"]);
+  plugin.recordCommand("b:two");
+  assert.deepEqual(plugin.saved.at(-1), { recentCommands: ["b:two", "a:one"] });
+});
+
+test("an unreadable data.json is never overwritten", async () => {
+  const { plugin } = await setup({ data: undefined });
+  plugin.recordCommand("a:one");
+  assert.deepEqual(plugin.recentCommands, ["a:one"]);
+  assert.deepEqual(plugin.saved, []);
 });

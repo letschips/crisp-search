@@ -176,3 +176,11 @@ test("a match only inside frontmatter shows that property line", () => {
   assert.ok(hit.excerpt.text.includes("custom: uniquemarker"), hit.excerpt.text);
   assert.deepEqual(hit.excerpt.ranges.map(([s, e]) => hit.excerpt.text.slice(s, e)), ["uniquemarker"]);
 });
+
+test("a title hit found through an alias shows the alias, not a bare file name", () => {
+  const engine = engineWith(doc("claim-0c6f.md", "body", { aliases: ["特定模型和设置，不外推其他任务"] }));
+  const [hit] = engine.search("设置");
+  assert.equal(hit.kind, "title");
+  assert.equal(hit.line, undefined);
+  assert.deepEqual(hit.excerpt.ranges.map(([s, e]) => hit.excerpt.text.slice(s, e)), ["设置"]);
+});

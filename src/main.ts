@@ -1,6 +1,14 @@
-import { CachedMetadata, Plugin, TAbstractFile, TFile, getAllTags, parseFrontMatterAliases } from "obsidian";
+import { CachedMetadata, Command, Hotkey, Plugin, TAbstractFile, TFile, getAllTags, parseFrontMatterAliases } from "obsidian";
 import { SearchDoc, SearchEngine } from "./engine";
 import { LauncherModal } from "./modal";
+
+const RECENT_COMMAND_LIMIT = 20;
+
+// Obsidian has no public API to list, look up hotkeys for or run commands; every launcher uses these.
+interface CommandHost {
+  commands: { commands: Record<string, Command>; executeCommandById(id: string): boolean };
+  hotkeyManager?: { getHotkeys(id: string): Hotkey[] | undefined; getDefaultHotkeys(id: string): Hotkey[] | undefined };
+}
 
 // Each indexing slice gives the main thread back after this long, so typing never stalls.
 const SLICE_MS = 12;
@@ -24,11 +32,24 @@ export default class CrispSearchPlugin extends Plugin {
   total = 0;
   ready = false;
   failed: string[] = [];
+  recentCommands: string[] = [];
+  // False when data.json exists but could not be read: saving then would overwrite it with defaults.
+  private dataWritable = true;
   private generation = 0;
   private progressListeners = new Set<() => void>();
   private unloaded = false;
 
   async onload(): Promise<void> {
+    const data: unknown = await this.loadData();
+    if (data === undefined) {
+      this.dataWritable = false;
+      console.warn("Crisp Search: data.json could not be read; recent commands will not be saved this session");
+    } else {
+      const recent = (data as { recentCommands?: unknown } | null)?.recentCommands;
+      if (Array.isArray(recent)) {
+        this.recentCommands = recent.filter((id): id is string => typeof id === "string").slice(0, RECENT_COMMAND_LIMIT);
+      }
+    }
     this.addCommand({ id: "open", name: "打开搜索面板", callback: () => this.openLauncher() });
     this.addCommand({ id: "rebuild-index", name: "重建搜索索引", callback: () => void this.rebuildIndex() });
     this.addRibbonIcon("search", "Crisp Search", () => this.openLauncher());
@@ -45,6 +66,24 @@ export default class CrispSearchPlugin extends Plugin {
 
   openLauncher(): void {
     new LauncherModal(this.app, this).open();
+  }
+
+  listCommands(): Command[] {
+    return Object.values((this.app as unknown as CommandHost).commands.commands);
+  }
+
+  hotkeysFor(id: string): Hotkey[] {
+    const manager = (this.app as unknown as CommandHost).hotkeyManager;
+    return manager?.getHotkeys(id) ?? manager?.getDefaultHotkeys(id) ?? [];
+  }
+
+  executeCommand(id: string): void {
+    (this.app as unknown as CommandHost).commands.executeCommandById(id);
+  }
+
+  recordCommand(id: string): void {
+    this.recentCommands = [id, ...this.recentCommands.filter((other) => other !== id)].slice(0, RECENT_COMMAND_LIMIT);
+    if (this.dataWritable) void this.saveData({ recentCommands: this.recentCommands });
   }
 
   onProgress(listener: () => void): () => void {

@@ -278,8 +278,16 @@ export class SearchEngine {
     results.sort((a, b) => b.score - a.score);
     const top = results.slice(0, limit);
     for (const result of top) {
-      if (result.kind === "title") continue;
       const doc = this.docs.get(result.path)!;
+      if (result.kind === "title") {
+        // Found through an alias: show it, or the row is a file name with no visible reason to be here.
+        const terms = result.terms ?? [];
+        const alias = findRanges(doc.basename, parts, terms).length
+          ? undefined
+          : doc.aliases.find((a) => findRanges(a, parts, terms).length > 0);
+        if (alias) result.excerpt = makeExcerpt(alias, query, terms);
+        continue;
+      }
       const terms = result.terms ?? [];
       result.excerpt = makeExcerpt(doc.content, query, terms);
       const heading =
