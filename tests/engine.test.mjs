@@ -34,8 +34,8 @@ function engineWith(...docs) {
 const paths = (results) => results.map((r) => r.path);
 
 test("Chinese runs become bigrams, English words lowercase, mixed text splits at the script boundary", () => {
-  assert.deepEqual(tokenizeText("知识库"), ["知识", "识库"]);
-  assert.deepEqual(tokenizeText("Obsidian插件 v2"), ["obsidian", "插件", "v2"]);
+  assert.deepEqual(tokenizeText("知识库"), ["知识", "识库", "库"]);
+  assert.deepEqual(tokenizeText("Obsidian插件 v2"), ["obsidian", "插件", "件", "v2"]);
   assert.deepEqual(tokenizeText("库"), ["库"]);
   assert.deepEqual(tokenizeText("，。!?"), []);
 });
@@ -136,4 +136,43 @@ test("excerpts open at a sentence or word boundary, never inside an English word
   assert.ok(zh.text.startsWith("…这里讲发布流程"), zh.text);
   const comma = makeExcerpt("甲".repeat(10) + "，" + "乙".repeat(9) + "发布", "发布");
   assert.ok(!/^…[，,]/.test(comma.text), comma.text);
+});
+
+// Audit 2026-10-29 B3: the last character of a Chinese run had no token starting with it.
+test("every character of a Chinese run is found on its own, in body, title and aliases", () => {
+  const engine = engineWith(
+    doc("body.md", "我们的知识库。下一句"),
+    doc("notes/周报模板.md"),
+    doc("alias.md", "", { aliases: ["学习笔记"] }),
+  );
+  for (const q of ["知", "识", "库", "句"]) assert.deepEqual(paths(engine.search(q)), ["body.md"], q);
+  assert.deepEqual(paths(engine.search("板")), ["notes/周报模板.md"]);
+  assert.deepEqual(paths(engine.search("记")), ["alias.md"]);
+});
+
+// B4: a typo found the file but the excerpt and line fell back to the top of the note.
+test("a fuzzy match points the excerpt and line at the word that actually matched", () => {
+  const engine = engineWith(doc("a.md", "# Title\n\nintro\n\nlauncher details\n"));
+  const [hit] = engine.search("launchr");
+  assert.equal(hit.line, 4);
+  assert.deepEqual(hit.excerpt.ranges.map(([s, e]) => hit.excerpt.text.slice(s, e)), ["launcher"]);
+});
+
+// B5: one term in the folder and one in the body was treated as a pure title hit, losing the body position.
+test("a query split between path and body keeps the body excerpt and line", () => {
+  const engine = engineWith(doc("项目/a.md", "第一行\n\n\n\n预算细节在这里"));
+  const [hit] = engine.search("项目 预算");
+  assert.equal(hit.kind, "content");
+  assert.equal(hit.line, 4);
+  assert.ok(hit.excerpt.text.includes("预算细节"));
+  assert.deepEqual(hit.excerpt.ranges.map(([s, e]) => hit.excerpt.text.slice(s, e)), ["预算"]);
+});
+
+// B6: a property-only hit showed unrelated body text.
+test("a match only inside frontmatter shows that property line", () => {
+  const engine = engineWith(doc("a.md", "---\ntitle: x\ncustom: uniquemarker\n---\nordinary body"));
+  const [hit] = engine.search("uniquemarker");
+  assert.equal(hit.line, 2);
+  assert.ok(hit.excerpt.text.includes("custom: uniquemarker"), hit.excerpt.text);
+  assert.deepEqual(hit.excerpt.ranges.map(([s, e]) => hit.excerpt.text.slice(s, e)), ["uniquemarker"]);
 });

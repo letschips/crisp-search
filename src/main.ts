@@ -14,13 +14,19 @@ export default class CrispSearchPlugin extends Plugin {
   indexed = 0;
   total = 0;
   ready = false;
+  failed: string[] = [];
+  private generation = 0;
   private progressListeners = new Set<() => void>();
   private unloaded = false;
 
   async onload(): Promise<void> {
     this.addCommand({ id: "open", name: "打开搜索面板", callback: () => this.openLauncher() });
+    this.addCommand({ id: "rebuild-index", name: "重建搜索索引", callback: () => void this.rebuildIndex() });
     this.addRibbonIcon("search", "Crisp Search", () => this.openLauncher());
-    this.app.workspace.onLayoutReady(() => void this.buildIndex());
+    this.app.workspace.onLayoutReady(() => {
+      this.watchVault();
+      void this.rebuildIndex();
+    });
   }
 
   onunload(): void {
@@ -46,8 +52,8 @@ export default class CrispSearchPlugin extends Plugin {
     return cache.isUserIgnored?.(path) ?? false;
   }
 
-  private async buildIndex(): Promise<void> {
-    // Watch first, so edits made while the initial pass runs are not lost.
+  // Registered once the layout is ready, so the vault's start-up create events are not replayed here.
+  private watchVault(): void {
     this.registerEvent(this.app.vault.on("create", (file) => this.onFileEvent(file)));
     this.registerEvent(this.app.vault.on("delete", (file) => this.engine.remove(file.path)));
     this.registerEvent(
@@ -58,16 +64,32 @@ export default class CrispSearchPlugin extends Plugin {
     );
     this.registerEvent(
       this.app.metadataCache.on("changed", (file, data, cache) => {
-        if (this.ready || this.engine.has(file.path)) this.upsert(file, data, cache);
+        if (this.isIgnored(file.path)) this.engine.remove(file.path);
+        else if (this.ready || this.engine.has(file.path)) this.upsert(file, data, cache);
       }),
     );
+  }
 
+  // Re-reads every file. Results stay searchable meanwhile; files gone from the vault are dropped at the end.
+  async rebuildIndex(): Promise<void> {
+    const generation = ++this.generation;
     const files = this.app.vault.getFiles().filter((file) => !this.isIgnored(file.path));
+    this.ready = false;
+    this.indexed = 0;
     this.total = files.length;
+    const failed: string[] = [];
+    this.emitProgress();
     let sliceStart = performance.now();
     for (const file of files) {
-      if (this.unloaded) return;
-      await this.indexFile(file);
+      if (this.unloaded || generation !== this.generation) return;
+      try {
+        await this.indexFile(file);
+      } catch (error) {
+        // One unreadable file must not stop the rest of the vault from being indexed.
+        console.warn(`Crisp Search: could not index ${file.path}`, error);
+        this.engine.remove(file.path);
+        failed.push(file.path);
+      }
       this.indexed++;
       if (performance.now() - sliceStart > SLICE_MS) {
         this.emitProgress();
@@ -75,12 +97,19 @@ export default class CrispSearchPlugin extends Plugin {
         sliceStart = performance.now();
       }
     }
+    if (this.unloaded || generation !== this.generation) return;
+    // Judge against the vault as it is now: files created during the pass are indexed by their own events.
+    const kept = new Set(this.app.vault.getFiles().filter((file) => !this.isIgnored(file.path)).map((file) => file.path));
+    for (const path of this.engine.paths()) if (!kept.has(path)) this.engine.remove(path);
+    this.failed = failed;
     this.ready = true;
     this.emitProgress();
   }
 
   private onFileEvent(file: TAbstractFile): void {
-    if (file instanceof TFile) void this.indexFile(file);
+    if (file instanceof TFile) {
+      this.indexFile(file).catch((error) => console.warn(`Crisp Search: could not index ${file.path}`, error));
+    }
   }
 
   private async indexFile(file: TFile): Promise<void> {

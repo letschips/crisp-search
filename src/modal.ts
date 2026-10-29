@@ -3,6 +3,7 @@ import { SearchResult, highlightRanges } from "./engine";
 import type CrispSearchPlugin from "./main";
 
 const RECENT_LIMIT = 8;
+let instanceCount = 0;
 
 type OpenMode = "current" | "tab" | "split";
 
@@ -62,6 +63,7 @@ export class LauncherModal extends Modal {
   private pointer = { x: -1, y: -1 };
   private stopProgress: (() => void) | null = null;
   private escapeScope: Scope | null = null;
+  private idPrefix = "";
   private readonly actions: Action[];
 
   constructor(app: App, plugin: CrispSearchPlugin) {
@@ -82,15 +84,24 @@ export class LauncherModal extends Modal {
 
     const bar = this.modalEl.createDiv("crisp-search-bar");
     setIcon(bar.createSpan("crisp-search-bar-icon"), "search");
+    this.idPrefix = `crisp-search-${++instanceCount}`;
     this.input = bar.createEl("input", {
       cls: "crisp-search-input",
       type: "text",
-      attr: { placeholder: "搜索笔记和内容…", spellcheck: "false", enterkeyhint: "go" },
+      attr: {
+        placeholder: "搜索笔记和内容…",
+        spellcheck: "false",
+        enterkeyhint: "go",
+        role: "combobox",
+        "aria-label": "搜索笔记和内容",
+        "aria-expanded": "true",
+        "aria-autocomplete": "list",
+        "aria-controls": `${this.idPrefix}-list`,
+      },
     });
     this.statusEl = bar.createSpan("crisp-search-status");
 
-    this.listEl = this.modalEl.createDiv("crisp-search-list");
-    this.listEl.setAttr("role", "listbox");
+    this.listEl = this.modalEl.createDiv({ cls: "crisp-search-list", attr: { id: `${this.idPrefix}-list`, role: "listbox" } });
 
     if (!Platform.isMobile) {
       const footer = this.modalEl.createDiv("crisp-search-footer");
@@ -155,8 +166,10 @@ export class LauncherModal extends Modal {
   }
 
   private renderStatus(): void {
-    const { ready, indexed, total } = this.plugin;
-    this.statusEl.setText(ready ? "" : `索引中 ${indexed}/${total}`);
+    const { ready, indexed, total, failed } = this.plugin;
+    if (!ready) this.statusEl.setText(`索引中 ${indexed}/${total}`);
+    else this.statusEl.setText(failed.length ? `${failed.length} 个文件未能索引` : "");
+    this.statusEl.setAttr("title", ready && failed.length ? `${failed.slice(0, 20).join("\n")}\n\n运行「重建搜索索引」重试` : "");
   }
 
   private modeFor(evt: MouseEvent | KeyboardEvent): OpenMode {
@@ -214,7 +227,7 @@ export class LauncherModal extends Modal {
     const items: Item[] = [];
     for (const path of this.app.workspace.getLastOpenFiles()) {
       const file = this.app.vault.getAbstractFileByPath(path);
-      if (file instanceof TFile) items.push({ file });
+      if (file instanceof TFile && !this.plugin.isIgnored(file.path)) items.push({ file });
       if (items.length >= RECENT_LIMIT) break;
     }
     return items;
@@ -234,6 +247,7 @@ export class LauncherModal extends Modal {
   private render(query: string): void {
     this.listEl.empty();
     this.rows = [];
+    this.input.removeAttribute("aria-activedescendant");
     this.listEl.scrollTop = 0;
     if (this.items.length === 0) {
       if (query) this.listEl.createDiv({ cls: "crisp-search-empty", text: this.plugin.ready ? "没有结果" : "正在建立索引…" });
@@ -253,7 +267,10 @@ export class LauncherModal extends Modal {
 
   private renderRow(item: Item, index: number, query: string): HTMLElement {
     const { file, result } = item;
-    const row = this.listEl.createDiv({ cls: "crisp-search-item", attr: { role: "option", "data-index": String(index) } });
+    const row = this.listEl.createDiv({
+      cls: "crisp-search-item",
+      attr: { id: `${this.idPrefix}-option-${index}`, role: "option", "aria-selected": "false", "data-index": String(index) },
+    });
     setIcon(row.createDiv("crisp-search-item-icon"), iconFor(file));
     const text = row.createDiv("crisp-search-item-text");
     const title = text.createSpan("crisp-search-item-title");
@@ -261,17 +278,26 @@ export class LauncherModal extends Modal {
     if (result?.excerpt?.text) {
       renderHighlighted(text.createSpan("crisp-search-item-subtitle"), result.excerpt.text, result.excerpt.ranges);
     }
-    const folder = file.parent && !file.parent.isRoot() ? file.parent.name : "";
-    if (folder) row.createDiv({ cls: "crisp-search-item-accessory", text: folder, attr: { title: file.path } });
+    // The last two folders plus a non-Markdown extension tell same-named files apart.
+    const folders = file.parent && !file.parent.isRoot() ? file.parent.path.split("/").slice(-2).join("/") : "";
+    const accessory = [file.extension === "md" ? "" : file.extension.toUpperCase(), folders].filter(Boolean).join(" · ");
+    if (accessory) row.createDiv({ cls: "crisp-search-item-accessory", text: accessory, attr: { title: file.path } });
     return row;
   }
 
   private select(index: number, scroll = true): void {
-    this.rows[this.selected]?.removeClass("is-selected");
+    const previous = this.rows[this.selected];
+    previous?.removeClass("is-selected");
+    previous?.setAttr("aria-selected", "false");
     this.selected = index;
     const row = this.rows[index];
-    if (!row) return;
+    if (!row) {
+      this.input.removeAttribute("aria-activedescendant");
+      return;
+    }
     row.addClass("is-selected");
+    row.setAttr("aria-selected", "true");
+    this.input.setAttr("aria-activedescendant", row.id);
     if (scroll) row.scrollIntoView({ block: "nearest" });
   }
 
