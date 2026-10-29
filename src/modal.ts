@@ -104,6 +104,8 @@ export class LauncherModal extends Modal {
   private escapeScope: Scope | null = null;
   private idPrefix = "";
   private refreshPending = false;
+  // True while an IME holds uncommitted text (raw pinyin) in the field.
+  private composing = false;
   // The body result whose hit list is showing, and where the list was when it opened.
   private drill: { item: FileItem; index: number; scrollTop: number } | null = null;
   private readonly fileActions: Action<FileItem>[];
@@ -173,7 +175,9 @@ export class LauncherModal extends Modal {
       this.drill = null;
       this.update();
     });
+    this.input.addEventListener("compositionstart", () => (this.composing = true));
     this.input.addEventListener("compositionend", () => {
+      this.composing = false;
       this.drill = null;
       this.update();
     });
@@ -231,7 +235,8 @@ export class LauncherModal extends Modal {
   // refresh waits and runs when the menu closes.
   private onIndexProgress(): void {
     this.renderStatus();
-    if (!this.input.value.trim() || this.commandMode()) return;
+    // Mid-composition the field holds raw pinyin; compositionend searches with the committed text anyway.
+    if (this.composing || !this.input.value.trim() || this.commandMode()) return;
     if (this.actionsOpen) this.refreshPending = true;
     else this.refreshKeepingSelection();
   }
@@ -278,6 +283,10 @@ export class LauncherModal extends Modal {
         const count = this.actionsFor(this.items[this.selected]).length;
         this.actionIndex = (this.actionIndex + step + count) % count;
         this.renderActions();
+      } else if (evt.key === "ArrowRight" && hasMoreHits(this.items[this.selected])) {
+        // The menu lists → next to the hit list, so → opens it here too.
+        evt.preventDefault();
+        this.enterHits();
       } else if (evt.key === "Enter") {
         evt.preventDefault();
         // A modified Enter means the action it is shown next to, whichever row is highlighted.
@@ -332,7 +341,7 @@ export class LauncherModal extends Modal {
   }
 
   private hitItems(parent: FileItem, query: string): Item[] {
-    const hits = this.plugin.engine.hits(parent.file.path, query, parent.result?.terms ?? []);
+    const hits = this.plugin.engine.hits(parent.file.path, query);
     return hits.map((hit) => ({ type: "file", section: parent.file.basename, file: parent.file, result: parent.result, hit }));
   }
 
@@ -408,7 +417,9 @@ export class LauncherModal extends Modal {
     this.input.removeAttribute("aria-activedescendant");
     this.listEl.scrollTop = 0;
     if (this.items.length === 0) {
-      if (query || commandMode) {
+      // An emptied hit list keeps its header, so there is still a way back.
+      if (this.drill) this.renderSection(this.drill.item.file.basename);
+      if (query || commandMode || this.drill) {
         const text = commandMode || this.plugin.ready ? "没有结果" : "正在建立索引…";
         this.listEl.createDiv({ cls: "crisp-search-empty", text });
       }
@@ -418,12 +429,7 @@ export class LauncherModal extends Modal {
     this.items.forEach((item, index) => {
       if (item.section !== section) {
         section = item.section;
-        const header = this.listEl.createDiv({ cls: "crisp-search-section", text: section });
-        if (this.drill) {
-          header.addClass("is-drill");
-          setIcon(header.createSpan({ cls: "crisp-search-section-back", attr: { "aria-label": "返回" } }), "chevron-left");
-          header.prepend(header.lastChild!);
-        }
+        this.renderSection(section);
       }
       const row =
         item.type === "command"
@@ -434,6 +440,14 @@ export class LauncherModal extends Modal {
       this.rows.push(row);
     });
     this.select(0);
+  }
+
+  private renderSection(text: string): void {
+    const header = this.listEl.createDiv({ cls: "crisp-search-section", text });
+    if (!this.drill) return;
+    header.addClass("is-drill");
+    setIcon(header.createSpan({ cls: "crisp-search-section-back", attr: { "aria-label": "返回" } }), "chevron-left");
+    header.prepend(header.lastChild!);
   }
 
   private createRow(index: number, icon: string): HTMLElement {
@@ -469,7 +483,7 @@ export class LauncherModal extends Modal {
     if (accessory) row.createDiv({ cls: "crisp-search-item-accessory", text: accessory, attr: { title: file.path } });
     if (hasMoreHits(item)) {
       const hits = row.createDiv({ cls: "crisp-search-item-hits", attr: { "aria-label": "查看全部命中" } });
-      hits.createSpan({ text: `${hitLabel(result!.hitCount!)} 处` });
+      hits.createSpan({ text: `${hitLabel(result!.hitCount!)} 行` });
       setIcon(hits.createSpan("crisp-search-item-hits-icon"), "chevron-right");
     }
     return row;
@@ -517,7 +531,7 @@ export class LauncherModal extends Modal {
     if (item.type === "command") return this.commandActions as Action[];
     if (!hasMoreHits(item)) return this.fileActions as Action[];
     const hits: Action<FileItem> = {
-      label: `查看全部 ${hitLabel(item.result!.hitCount!)} 处命中`,
+      label: item.result!.hitCount! > MAX_HITS ? `查看前 ${MAX_HITS} 行命中` : `查看全部 ${item.result!.hitCount} 行命中`,
       icon: "list",
       keys: ["→"],
       run: () => this.enterHits(),

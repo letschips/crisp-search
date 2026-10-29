@@ -1,4 +1,4 @@
-import MiniSearch from "minisearch";
+import MiniSearch, { SearchOptions } from "minisearch";
 import { pinyin } from "pinyin-pro";
 
 // Han, kana and hangul have no spaces between words, so they are indexed as overlapping bigrams.
@@ -102,24 +102,63 @@ function queryParts(query: string): string[] {
     .filter((part) => tokenizeText(part).length > 0);
 }
 
-// A part is located literally first; scattered bigram matches fall back to each token, and a fuzzy or
-// prefix match falls back to the indexed terms that actually matched.
-// Only English words are matched fuzzily, so only they fall back to matched terms.
-function needlesFor(part: string, matchedTerms: string[]): string[][] {
-  const literal = [[part.toLowerCase()], tokenizeText(part)];
-  return isCjk(part) ? literal : [...literal, matchedTerms.filter((term) => !isCjk(term))];
+const FUZZY = 0.2;
+const MAX_FUZZY = 6;
+const LATIN_WORD_CHAR = /[a-z0-9]/;
+
+// Same distance MiniSearch allows for a fuzzy term of this length.
+function fuzzyDistance(term: string): number {
+  return isCjk(term) || term.length < 4 ? 0 : Math.min(MAX_FUZZY, Math.round(term.length * FUZZY));
+}
+
+function editDistance(a: string, b: string, max: number): number {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  let previous = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const current = [i];
+    for (let j = 1; j <= b.length; j++) {
+      current[j] = Math.min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    previous = current;
+  }
+  return previous[b.length];
+}
+
+// The indexed terms that one English query token could have matched: by prefix or within fuzzy distance.
+// Terms that matched other query words are not this token's evidence.
+function termsForToken(token: string, matchedTerms: string[]): string[] {
+  const max = fuzzyDistance(token);
+  return matchedTerms.filter(
+    (term) => !isCjk(term) && term !== token && (term.startsWith(token) || (max > 0 && editDistance(term, token, max) <= max)),
+  );
+}
+
+// Chinese matches anywhere; an English needle only where a word starts, as the index tokenizes it.
+function occurrences(lower: string, needle: string): number[] {
+  const latin = !isCjk(needle);
+  const found: number[] = [];
+  for (let at = lower.indexOf(needle); at !== -1; at = lower.indexOf(needle, at + 1)) {
+    if (!latin || at === 0 || !LATIN_WORD_CHAR.test(lower[at - 1])) found.push(at);
+  }
+  return found;
+}
+
+// Ways to locate one query word, most exact first: the word itself, then its tokens (a Chinese word as
+// bigrams), then for English tokens the fuzzy terms that matched it.
+function needleLevels(part: string, matchedTerms: string[]): string[][] {
+  const tokens = tokenizeText(part);
+  const fuzzy = tokens.filter((token) => !isCjk(token)).flatMap((token) => termsForToken(token, matchedTerms));
+  return [[part.toLowerCase()], tokens, fuzzy];
 }
 
 function findRanges(text: string, parts: string[], matchedTerms: string[] = []): [number, number][] {
   const lower = text.toLowerCase();
   const ranges: [number, number][] = [];
   for (const part of parts) {
-    for (const needles of needlesFor(part, matchedTerms)) {
+    for (const needles of needleLevels(part, matchedTerms)) {
       const before = ranges.length;
       for (const needle of needles) {
-        for (let at = lower.indexOf(needle); at !== -1; at = lower.indexOf(needle, at + needle.length)) {
-          ranges.push([at, at + needle.length]);
-        }
+        for (const at of occurrences(lower, needle)) ranges.push([at, at + needle.length]);
       }
       if (ranges.length > before) break;
     }
@@ -132,6 +171,17 @@ function findRanges(text: string, parts: string[], matchedTerms: string[] = []):
     else merged.push([...range]);
   }
   return merged;
+}
+
+// A line answers a query word when it holds the word, or every token of it: Chinese tokens anywhere,
+// English tokens at a word start or as one of the fuzzy terms that matched that token.
+function lineHolds(lowerLine: string, part: string, matchedTerms: string[]): boolean {
+  if (occurrences(lowerLine, part.toLowerCase()).length) return true;
+  return tokenizeText(part).every(
+    (token) =>
+      occurrences(lowerLine, token).length > 0 ||
+      (!isCjk(token) && termsForToken(token, matchedTerms).some((term) => occurrences(lowerLine, term).length > 0)),
+  );
 }
 
 export function highlightRanges(text: string, query: string): [number, number][] {
@@ -181,15 +231,6 @@ function lineAt(text: string, offset: number): number {
   return (text.slice(0, offset).match(/\n/g) ?? []).length;
 }
 
-// A line answers a query word when it holds the word itself; a Chinese word may also be split into
-// bigrams that all sit on the line, and an English word may appear as the fuzzy term that matched.
-function lineHolds(line: string, part: string, matchedTerms: string[]): boolean {
-  const lower = part.toLowerCase();
-  if (line.includes(lower)) return true;
-  if (isCjk(part)) return tokenizeText(part).every((token) => line.includes(token));
-  return matchedTerms.some((term) => !isCjk(term) && line.includes(term));
-}
-
 // Offsets of the first match on each body line that answers every query word, in note order.
 function hitStarts(body: string, parts: string[], matchedTerms: string[], limit: number): number[] {
   const starts: number[] = [];
@@ -214,7 +255,8 @@ function propertyExcerpt(frontmatter: string, parts: string[], matchedTerms: str
   return { text, ranges: findRanges(text, parts, matchedTerms), line: lineAt(frontmatter, property[0]) };
 }
 
-function excerptAt(body: string, at: number, line: number, parts: string[], matchedTerms: string[]): Excerpt {
+// A hit-list row stays on its own line; a result excerpt may run on for context.
+function excerptAt(body: string, at: number, line: number, parts: string[], matchedTerms: string[], ownLine = false): Excerpt {
   const start = Math.max(0, at - EXCERPT_BEFORE);
   // Start on a line boundary when one is close, so the excerpt does not open mid-sentence.
   const lineStart = body.lastIndexOf("\n", at - 1) + 1;
@@ -227,8 +269,10 @@ function excerptAt(body: string, at: number, line: number, parts: string[], matc
     else while (from < at && WORD_CHAR.test(body[from - 1]) && WORD_CHAR.test(body[from])) from++;
     while (from < at && /[\s，、,:：）)」』]/.test(body[from])) from++;
   }
-  const needles = parts.flatMap((part) => needlesFor(part, matchedTerms).flat());
-  let text = cleanMarkdown(body.slice(from, at + EXCERPT_AFTER), needles);
+  const needles = parts.flatMap((part) => needleLevels(part, matchedTerms).flat());
+  const lineEnd = body.indexOf("\n", at);
+  const end = ownLine && lineEnd !== -1 ? Math.min(lineEnd, at + EXCERPT_AFTER) : at + EXCERPT_AFTER;
+  let text = cleanMarkdown(body.slice(from, end), needles);
   if (from > lineStart) text = "…" + text;
   return { text, ranges: findRanges(text, parts, matchedTerms), line };
 }
@@ -266,10 +310,17 @@ export function makeExcerpts(content: string, query: string, matchedTerms: strin
   for (const at of starts) {
     line += lineAt(body.slice(counted, at), at - counted);
     counted = at;
-    excerpts.push(excerptAt(body, at, line, parts, matchedTerms));
+    excerpts.push(excerptAt(body, at, line, parts, matchedTerms, true));
   }
   return excerpts;
 }
+
+const SEARCH_OPTIONS: SearchOptions = {
+  boost: BOOST,
+  combineWith: "AND",
+  prefix: (term: string) => !isCjk(term) || term.length === 1,
+  fuzzy: (term: string) => (fuzzyDistance(term) ? FUZZY : 0),
+};
 
 export class SearchEngine {
   private readonly docs = new Map<string, SearchDoc>();
@@ -316,9 +367,13 @@ export class SearchEngine {
     return this.docs.has(path);
   }
 
-  hits(path: string, query: string, matchedTerms: string[] = []): Excerpt[] {
+  // Matches this note against the query as it is now, so the list never mixes old terms with new text.
+  hits(path: string, query: string): Excerpt[] {
     const doc = this.docs.get(path);
-    return doc ? makeExcerpts(doc.content, this.bodyQuery(path, queryParts(query)), matchedTerms) : [];
+    const parts = queryParts(query);
+    if (!doc || parts.length === 0) return [];
+    const [hit] = this.index.search(parts.join(" "), { ...SEARCH_OPTIONS, filter: (result) => result.id === path });
+    return hit ? makeExcerpts(doc.content, this.bodyQuery(path, parts), hit.terms) : [];
   }
 
   private inTitle(path: string, part: string): boolean {
@@ -341,12 +396,7 @@ export class SearchEngine {
   search(query: string, limit = 60): SearchResult[] {
     const parts = queryParts(query);
     if (parts.length === 0) return [];
-    const hits = this.index.search(parts.join(" "), {
-      boost: BOOST,
-      combineWith: "AND",
-      prefix: (term) => !isCjk(term) || term.length === 1,
-      fuzzy: (term) => (!isCjk(term) && term.length >= 4 ? 0.2 : 0),
-    });
+    const hits = this.index.search(parts.join(" "), SEARCH_OPTIONS);
     const lowerParts = parts.map((p) => p.toLowerCase());
     const results: SearchResult[] = [];
     for (const hit of hits) {
@@ -388,9 +438,11 @@ export class SearchEngine {
       result.excerpt = makeExcerpt(doc.content, bodyQuery, terms);
       // Counted one past the cap, so the panel can tell "50" from "more than 50".
       result.hitCount = Math.max(1, hitStarts(splitFrontmatter(doc.content).body, queryParts(bodyQuery), terms, MAX_HITS + 1).length);
+      // A heading is the place to open only when it answers the whole query; otherwise the excerpt is.
+      const lineParts = queryParts(bodyQuery);
       const heading =
         result.kind === "heading"
-          ? doc.headings.find((h) => findRanges(h.text, parts, terms).length > 0)
+          ? doc.headings.find((h) => lineParts.every((part) => lineHolds(h.text.toLowerCase(), part, terms)))
           : undefined;
       result.line = heading ? heading.line : result.excerpt.line;
     }

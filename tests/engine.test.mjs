@@ -250,3 +250,55 @@ test("a note with more hits than the list shows reports one past the cap", () =>
   const [hit] = engineWith(doc("many.md", content)).search("发布");
   assert.equal(hit.hitCount, 51);
 });
+
+// Audit round 4. These go through engine.search and engine.hits, so the matched terms are the real ones.
+const hitLines = (engine, path, q) => engine.hits(path, q).map((h) => h.line);
+
+test("R4-1: each English word needs its own match on the line", () => {
+  const engine = engineWith(doc("a.md", "alpha only\nbeta only\nalpha beta together\n"));
+  const [hit] = engine.search("alpha beta");
+  assert.equal(hit.hitCount, 1);
+  assert.equal(hit.line, 2);
+  assert.deepEqual(hitLines(engine, "a.md", "alpha beta"), [2]);
+});
+
+test("R4-1: an English word matches at a word start, not inside another word", () => {
+  const engine = engineWith(doc("a.md", "daily planning\nAI research\nemail archive\n"));
+  const [hit] = engine.search("AI");
+  assert.equal(hit.line, 1);
+  assert.deepEqual(hitLines(engine, "a.md", "AI"), [1]);
+  assert.deepEqual(hit.excerpt.ranges.map(([s, e]) => hit.excerpt.text.slice(s, e)), ["AI"]);
+});
+
+test("R4-1: a typo and an exact word combine per word", () => {
+  const engine = engineWith(doc("a.md", "launcher only\nnotes only\nlauncher notes\n"));
+  assert.deepEqual(hitLines(engine, "a.md", "launchr notes"), [2]);
+});
+
+test("R4-1: Chinese and English words in one query", () => {
+  const engine = engineWith(doc("a.md", "插件很多\nobsidian 主题\nobsidian 插件开发\n"));
+  assert.deepEqual(hitLines(engine, "a.md", "插件 obsidian"), [2]);
+});
+
+test("R4-2: the hit list uses matches from the current text, not the search that opened it", () => {
+  const engine = engineWith(doc("a.md", "launcher first\nlauncher second\n"));
+  engine.search("launchr");
+  engine.upsert(doc("a.md", "launch first\nlaunch second\n"));
+  assert.deepEqual(hitLines(engine, "a.md", "launchr"), [0, 1]);
+});
+
+test("R4-3: a heading that answers only part of the query does not override the excerpt line", () => {
+  const engine = engineWith(
+    doc("a.md", "# 预算说明\n\n无关内容\n\n预算 风险\n预算 风险\n", { headings: [{ text: "预算说明", line: 0 }] }),
+  );
+  const [hit] = engine.search("预算 风险");
+  assert.equal(hit.line, 4);
+  assert.equal(hit.excerpt.line, 4);
+});
+
+test("a hit-list row shows only its own line", () => {
+  const engine = engineWith(doc("a.md", "第一行讲发布\n第二行无关内容很长很长\n第三行也讲发布\n"));
+  const [first, second] = engine.hits("a.md", "发布");
+  assert.ok(!first.text.includes("第二行"), first.text);
+  assert.equal(second.line, 2);
+});
