@@ -21,7 +21,6 @@ await esbuild.build({
   plugins: [{ name: "obsidian-stub", setup: (b) => b.onResolve({ filter: /^obsidian$/ }, () => ({ path: pathToFileURL(stub).href, external: true })) }],
 });
 const { default: CrispSearchPlugin } = await import(pathToFileURL(path.join(outDir, "main.mjs")).href);
-globalThis.window = { setTimeout };
 
 function setup({ fail = () => false, ignored = () => false } = {}) {
   const files = ["a.md", "bad.md", "z.md"].map((p) => new TFile(p));

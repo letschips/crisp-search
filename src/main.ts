@@ -5,8 +5,17 @@ import { LauncherModal } from "./modal";
 // Each indexing slice gives the main thread back after this long, so typing never stalls.
 const SLICE_MS = 12;
 
+// A message-channel task, not setTimeout: Chromium clamps timers in a background window to about one per
+// second, which made a full index of a 3,800-file vault take over an hour while Obsidian was not in front.
 function sliceBreak(): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, 0));
+  return new Promise((resolve) => {
+    const channel = new MessageChannel();
+    channel.port1.onmessage = () => {
+      channel.port1.close();
+      resolve();
+    };
+    channel.port2.postMessage(null);
+  });
 }
 
 export default class CrispSearchPlugin extends Plugin {
