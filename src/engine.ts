@@ -429,17 +429,27 @@ export class SearchEngine {
     return [...this.docs.keys()];
   }
 
-  // Name matches come first and `order` sorts within each group (relevance by default), both before `limit`,
-  // so the cut never drops a name match the panel would list first. `keep` drops paths the caller no longer
-  // searches, such as newly excluded folders whose entries have not been removed yet.
   search(
     query: string,
     limit = 60,
     order?: (a: SearchResult, b: SearchResult) => number,
     keep?: (path: string) => boolean,
   ): SearchResult[] {
+    return this.searchPage(query, limit, order, keep).results;
+  }
+
+  // Name matches come first and `order` sorts within each group (relevance by default), both before `limit`,
+  // so the cut never drops a name match the panel would list first. `keep` drops paths the caller no longer
+  // searches, such as newly excluded folders whose entries have not been removed yet. `total` counts every
+  // match that passed `keep`, so the panel can say how many the cut left out.
+  searchPage(
+    query: string,
+    limit = 60,
+    order?: (a: SearchResult, b: SearchResult) => number,
+    keep?: (path: string) => boolean,
+  ): { results: SearchResult[]; total: number } {
     const parts = queryParts(query);
-    if (parts.length === 0) return [];
+    if (parts.length === 0) return { results: [], total: 0 };
     const hits = this.index.search(parts.join(" "), SEARCH_OPTIONS);
     const lowerParts = parts.map((p) => p.toLowerCase());
     const results: SearchResult[] = [];
@@ -499,6 +509,6 @@ export class SearchEngine {
           : undefined;
       result.line = heading ? heading.line : result.excerpt.line;
     }
-    return top;
+    return { results: top, total: results.length };
   }
 }

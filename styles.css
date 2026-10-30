@@ -92,6 +92,8 @@ body .crisp-search-container .modal.crisp-search-panel input.crisp-search-input.
   flex: 1;
   min-height: 0;
   padding: 0 8px 68px;
+  /* Rows brought into view by the keyboard stop above the floating footer, not under it. */
+  scroll-padding-bottom: 68px;
   overflow-y: auto;
   scrollbar-width: none;
 }
@@ -340,6 +342,18 @@ body .crisp-search-container .modal.crisp-search-panel input.crisp-search-input.
 
 .crisp-search-item-strong {
   font-weight: 600;
+}
+
+/* A cut list ends with its full count, as a row to Obsidian's search or as plain text. */
+
+.crisp-search-item.is-more .crisp-search-item-title {
+  color: var(--text-muted);
+}
+
+.crisp-search-cut {
+  padding: 10px 14px;
+  color: var(--text-faint);
+  font-size: 13px;
 }
 
 /* ⌘K actions */

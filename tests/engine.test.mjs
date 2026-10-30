@@ -343,3 +343,12 @@ test("B4: an attachment is found by its full file name, as a name match", () => 
     assert.equal(first.kind, "title", query);
   }
 });
+
+test("the full number of matches is reported next to the cut list, after the caller's filter", () => {
+  const engine = engineWith(...Array.from({ length: 75 }, (_, i) => doc(`${i < 5 ? "private" : "notes"}/n${i}.md`, "needle")));
+  const page = engine.searchPage("needle", 60, undefined, (path) => !path.startsWith("private/"));
+  assert.equal(page.results.length, 60);
+  assert.equal(page.total, 70);
+  assert.deepEqual(engine.searchPage("needle", 100).total, 75);
+  assert.equal(engine.searchPage("", 60).total, 0);
+});

@@ -44,7 +44,15 @@ interface QueryItem {
   query: string;
 }
 
-type Item = FileItem | CommandItem | CreateItem | QueryItem;
+// Below a cut list: how many matched in all, and the way to see the rest in Obsidian's own search.
+interface MoreItem {
+  type: "more";
+  section: "";
+  shown: number;
+  total: number;
+}
+
+type Item = FileItem | CommandItem | CreateItem | QueryItem | MoreItem;
 
 // Recent searches shown under the recent notes in an empty panel.
 const RECENT_QUERY_SHOWN = 3;
@@ -97,6 +105,7 @@ function itemKey(item: Item): string {
   if (item.type === "command") return `command:${item.command.id}`;
   if (item.type === "create") return `create:${item.name}`;
   if (item.type === "query") return `query:${item.query}`;
+  if (item.type === "more") return "more";
   return item.hit ? `hit:${item.file.path}:${item.hit.line}` : `file:${item.file.path}`;
 }
 
@@ -139,6 +148,9 @@ export class LauncherModal extends Modal {
   private readonly commandActions: Action<CommandItem>[];
   private readonly createActions: Action<CreateItem>[];
   private readonly queryActions: Action<QueryItem>[];
+  private readonly moreActions: Action<MoreItem>[];
+  // Set when the list is cut and Obsidian's search is off, so the count shows as plain text instead.
+  private cutNotice = "";
   // A sort picked in the panel lasts until it closes; the setting is the default.
   private sortOverride: SortOrder | null = null;
   private primaryLabel: HTMLElement | null = null;
@@ -164,6 +176,7 @@ export class LauncherModal extends Modal {
       { label: "在新标签页新建", icon: "plus-square", keys: MODE_KEYS.tab, run: (item) => void this.createNote(item, "tab") },
       { label: "在右侧新建", icon: "columns-2", keys: MODE_KEYS.split, run: (item) => void this.createNote(item, "split") },
     ];
+    this.moreActions = [{ label: "在 Obsidian 搜索中查看", icon: "search", keys: ["↵"], run: () => this.openGlobalSearch() }];
     this.queryActions = [
       { label: "搜索", icon: "search", keys: ["↵"], run: (item) => this.searchAgain(item) },
       { label: "从最近搜索中移除", icon: "x", keys: [], run: (item) => this.forgetQuery(item) },
@@ -403,6 +416,7 @@ export class LauncherModal extends Modal {
     const commandMode = COMMAND_PREFIX.test(raw);
     const query = (commandMode ? raw.slice(1) : raw).trim();
     this.refreshPending = false;
+    this.cutNotice = "";
     this.toggleActions(false);
     if (!this.plugin.licensed) {
       this.renderLocked();
@@ -485,13 +499,19 @@ export class LauncherModal extends Modal {
     };
     // Exclusions apply as soon as they change, before the index has caught up.
     const keep = (path: string) => !this.plugin.isIgnored(path);
-    for (const result of this.plugin.engine.search(query, undefined, resultOrder(this.sortOrder, stat), keep)) {
+    const page = this.plugin.engine.searchPage(query, undefined, resultOrder(this.sortOrder, stat), keep);
+    for (const result of page.results) {
       const file = this.app.vault.getAbstractFileByPath(result.path);
       if (!(file instanceof TFile)) continue;
       if (result.kind === "title") titles.push({ type: "file", section: "笔记", file, result });
       else bodies.push({ type: "file", section: "内容", file, result });
     }
     const items: Item[] = [...titles, ...this.commandItems(query, MIXED_COMMAND_LIMIT), ...bodies];
+    if (page.total > page.results.length) {
+      const shown = page.results.length;
+      if (this.globalSearch()) items.push({ type: "more", section: "", shown, total: page.total });
+      else this.cutNotice = `共 ${page.total.toLocaleString()} 条结果，这里显示前 ${shown} 条`;
+    }
     // A note already named this way is the result to open, not one to create again.
     const name = newNoteName(query, this.app.vault.getFiles());
     if (name) items.push({ type: "create", section: "", name });
@@ -552,11 +572,14 @@ export class LauncherModal extends Modal {
             ? this.renderCreateRow(item, index)
             : item.type === "query"
               ? this.renderQueryRow(item, index)
+              : item.type === "more"
+                ? this.renderMoreRow(item, index)
             : item.hit
             ? this.renderHitRow(item, item.hit, index)
             : this.renderFileRow(item, index, query);
       this.rows.push(row);
     });
+    if (this.cutNotice) this.listEl.createDiv({ cls: "crisp-search-cut", text: this.cutNotice });
     this.select(0);
   }
 
@@ -607,6 +630,17 @@ export class LauncherModal extends Modal {
     return row;
   }
 
+  private renderMoreRow(item: MoreItem, index: number): HTMLElement {
+    const row = this.createRow(index, "search");
+    row.addClass("is-more");
+    row.createDiv("crisp-search-item-text").createSpan({
+      cls: "crisp-search-item-title",
+      text: `共 ${item.total.toLocaleString()} 条结果，这里显示前 ${item.shown} 条`,
+    });
+    row.createDiv({ cls: "crisp-search-item-accessory", text: "在 Obsidian 搜索中查看" });
+    return row;
+  }
+
   private renderQueryRow(item: QueryItem, index: number): HTMLElement {
     const row = this.createRow(index, "history");
     row.createDiv("crisp-search-item-text").createSpan({ cls: "crisp-search-item-title", text: item.query });
@@ -646,7 +680,7 @@ export class LauncherModal extends Modal {
     this.input.setAttr("aria-activedescendant", row.id);
     if (scroll) row.scrollIntoView({ block: "nearest" });
     const type = this.items[index].type;
-    const labels: Record<Item["type"], string> = { command: "运行", create: "新建", query: "搜索", file: "打开" };
+    const labels: Record<Item["type"], string> = { command: "运行", create: "新建", query: "搜索", file: "打开", more: "查看" };
     this.primaryLabel?.setText(labels[type]);
   }
 
@@ -667,6 +701,7 @@ export class LauncherModal extends Modal {
     if (item.type === "command") return this.commandActions as Action[];
     if (item.type === "create") return this.createActions as Action[];
     if (item.type === "query") return this.queryActions as Action[];
+    if (item.type === "more") return this.moreActions as Action[];
     // Inserting needs a note open in an editor behind the panel.
     const fileActions = this.app.workspace.activeEditor?.editor
       ? this.fileActions
@@ -738,6 +773,7 @@ export class LauncherModal extends Modal {
     if (item.type === "command") this.runCommand(item);
     else if (item.type === "create") void this.createNote(item, mode);
     else if (item.type === "query") this.searchAgain(item);
+    else if (item.type === "more") this.openGlobalSearch();
     else void this.openFile(item, mode);
   }
 
@@ -853,6 +889,23 @@ export class LauncherModal extends Modal {
   private rememberQuery(): void {
     const raw = this.input.value.trim();
     if (raw && !COMMAND_PREFIX.test(raw)) this.plugin.recordQuery(raw);
+  }
+
+  // Obsidian's core search, when it is turned on; it has no public API.
+  private globalSearch(): { openGlobalSearch(query: string): void } | null {
+    const internal = (this.app as unknown as {
+      internalPlugins?: { getPluginById(id: string): { enabled: boolean; instance?: { openGlobalSearch?: (query: string) => void } } | null };
+    }).internalPlugins;
+    const plugin = internal?.getPluginById("global-search");
+    const instance = plugin?.enabled ? plugin.instance : undefined;
+    return instance?.openGlobalSearch ? (instance as { openGlobalSearch(query: string): void }) : null;
+  }
+
+  private openGlobalSearch(): void {
+    const query = this.input.value.trim();
+    this.rememberQuery();
+    this.close();
+    this.globalSearch()?.openGlobalSearch(query);
   }
 
   private searchAgain(item: QueryItem): void {
