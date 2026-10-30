@@ -346,11 +346,11 @@ test("B4: an attachment is found by its full file name, as a name match", () => 
 
 test("the full number of matches is reported next to the cut list, after the caller's filter", () => {
   const engine = engineWith(...Array.from({ length: 75 }, (_, i) => doc(`${i < 5 ? "private" : "notes"}/n${i}.md`, "needle")));
-  const page = engine.searchPage("needle", 60, undefined, (path) => !path.startsWith("private/"));
+  const page = engine.searchPage("needle", { keep: (path) => !path.startsWith("private/") });
   assert.equal(page.results.length, 60);
   assert.equal(page.total, 70);
-  assert.deepEqual(engine.searchPage("needle", 100).total, 75);
-  assert.equal(engine.searchPage("", 60).total, 0);
+  assert.deepEqual(engine.searchPage("needle", { limit: 100 }).total, 75);
+  assert.equal(engine.searchPage("").total, 0);
 });
 
 test("the literal-word bonus ignores case and takes regex characters literally", () => {
@@ -358,4 +358,22 @@ test("the literal-word bonus ignores case and takes regex characters literally",
   assert.equal(engine.search("obsidian")[0].path, "literal.md");
   assert.deepEqual(paths(engine.search("C++")), ["plus.md"]);
   assert.deepEqual(paths(engine.search("(and")), ["plus.md"]);
+});
+
+test("accept() drops results by kind before the cut and the count", () => {
+  const engine = engineWith(doc("needle.md", "x"), ...Array.from({ length: 70 }, (_, i) => doc(`b${i}.md`, "needle")));
+  const names = engine.searchPage("needle", { accept: (r) => r.kind === "title" });
+  assert.deepEqual([names.total, names.results.map((r) => r.path)], [1, ["needle.md"]]);
+  const bodies = engine.searchPage("needle", { accept: (r) => r.kind !== "title" });
+  assert.deepEqual([bodies.total, bodies.results.length], [70, 60]);
+});
+
+test("filters alone list every kept file in the given order, counted and cut", () => {
+  const engine = engineWith(...Array.from({ length: 65 }, (_, i) => doc(`f${String(i).padStart(2, "0")}.md`)), doc("x.png", "", { extension: "png" }));
+  const page = engine.listPage({ keep: (path) => path.endsWith(".md"), order: (a, b) => b.path.localeCompare(a.path) });
+  assert.equal(page.total, 65);
+  assert.equal(page.results.length, 60);
+  assert.equal(page.results[0].path, "f64.md");
+  assert.equal(page.results[0].kind, "title");
+  assert.equal(engine.doc("x.png").extension, "png");
 });

@@ -60,6 +60,18 @@ export interface SearchDoc {
 
 export type MatchKind = "title" | "heading" | "content";
 
+export interface PageOptions {
+  limit?: number;
+  order?: (a: SearchResult, b: SearchResult) => number;
+  keep?: (path: string) => boolean;
+  accept?: (result: SearchResult) => boolean;
+}
+
+export interface Page {
+  results: SearchResult[];
+  total: number;
+}
+
 export interface Excerpt {
   text: string;
   ranges: [number, number][];
@@ -440,19 +452,19 @@ export class SearchEngine {
     order?: (a: SearchResult, b: SearchResult) => number,
     keep?: (path: string) => boolean,
   ): SearchResult[] {
-    return this.searchPage(query, limit, order, keep).results;
+    return this.searchPage(query, { limit, order, keep }).results;
+  }
+
+  doc(path: string): SearchDoc | undefined {
+    return this.docs.get(path);
   }
 
   // Name matches come first and `order` sorts within each group (relevance by default), both before `limit`,
   // so the cut never drops a name match the panel would list first. `keep` drops paths the caller no longer
-  // searches, such as newly excluded folders whose entries have not been removed yet. `total` counts every
-  // match that passed `keep`, so the panel can say how many the cut left out.
-  searchPage(
-    query: string,
-    limit = 60,
-    order?: (a: SearchResult, b: SearchResult) => number,
-    keep?: (path: string) => boolean,
-  ): { results: SearchResult[]; total: number } {
+  // searches (excluded folders not yet removed, filters), `accept` drops results by how they matched (scope
+  // tabs). `total` counts every match both let through, so the panel can say how many the cut left out.
+  searchPage(query: string, options: PageOptions = {}): Page {
+    const { limit = 60, order, keep, accept } = options;
     const parts = queryParts(query);
     if (parts.length === 0) return { results: [], total: 0 };
     const hits = this.index.search(parts.join(" "), SEARCH_OPTIONS);
@@ -480,7 +492,8 @@ export class SearchEngine {
       if (title === phrase || `${title}.${doc.extension}` === phrase) score *= 3;
       else if (lowerParts.every((p) => title.includes(p))) score *= 2;
       else if (literals.every((literal) => literal.test(doc.content))) score *= 1.5;
-      results.push({ path: doc.path, basename: doc.basename, extension: doc.extension, kind, score, terms: hit.terms });
+      const result: SearchResult = { path: doc.path, basename: doc.basename, extension: doc.extension, kind, score, terms: hit.terms };
+      if (!accept || accept(result)) results.push(result);
     }
     const within = order ?? ((a: SearchResult, b: SearchResult) => b.score - a.score);
     const group = (r: SearchResult) => (r.kind === "title" ? 0 : 1);
@@ -514,5 +527,18 @@ export class SearchEngine {
       result.line = heading ? heading.line : result.excerpt.line;
     }
     return { results: top, total: results.length };
+  }
+
+  // Every kept file as a name result, for filters with no search words; `order` is needed, there is no score.
+  listPage(options: PageOptions = {}): Page {
+    const { limit = 60, order, keep, accept } = options;
+    const results: SearchResult[] = [];
+    for (const doc of this.docs.values()) {
+      if (keep && !keep(doc.path)) continue;
+      const result: SearchResult = { path: doc.path, basename: doc.basename, extension: doc.extension, kind: "title", score: 0 };
+      if (!accept || accept(result)) results.push(result);
+    }
+    if (order) results.sort(order);
+    return { results: results.slice(0, limit), total: results.length };
   }
 }

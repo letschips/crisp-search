@@ -52,6 +52,81 @@
   stroke-width: 2;
 }
 
+/* Filter chips sit before the field, in the same line. */
+
+.crisp-search-chips {
+  display: flex;
+  flex: none;
+  gap: 6px;
+  max-width: 50%;
+  overflow: hidden;
+}
+
+.crisp-search-chips:empty {
+  display: none;
+}
+
+.crisp-search-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 26px;
+  padding: 0 4px 0 10px;
+  border-radius: 999px;
+  background: var(--crisp-search-hover);
+  color: var(--text-normal);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.crisp-search-chip-remove {
+  display: flex;
+  padding: 3px;
+  border-radius: 999px;
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.crisp-search-chip-remove:hover {
+  background: var(--crisp-search-line);
+}
+
+.crisp-search-chip-remove svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* Type tabs under the field. */
+
+.crisp-search-scopes {
+  display: flex;
+  flex: none;
+  gap: 4px;
+  padding: 0 16px 10px;
+}
+
+.crisp-search-scope {
+  padding: 4px 12px;
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 13px;
+  cursor: default;
+}
+
+.crisp-search-scope:hover {
+  color: var(--text-normal);
+}
+
+.crisp-search-scope.is-active {
+  background: var(--crisp-search-hover);
+  color: var(--text-normal);
+  font-weight: 600;
+}
+
+.crisp-search-panel.is-locked .crisp-search-scopes {
+  display: none;
+}
+
 .crisp-search-panel input.crisp-search-input {
   flex: 1;
   min-width: 0;

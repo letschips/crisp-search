@@ -1,6 +1,19 @@
 import { App, Command, Hotkey, Keymap, Menu, Modal, Notice, Platform, Scope, TFile, TFolder, normalizePath, setIcon } from "obsidian";
 import { CommandIndex, CommandMatch, isCommandAvailable } from "./commands";
 import { Excerpt, MAX_HITS, SearchResult, highlightRanges, highlightSegments } from "./engine";
+import {
+  FILTER_KINDS,
+  Filter,
+  FilterKind,
+  SCOPES,
+  Scope as SearchScope,
+  filterLabel,
+  isNote,
+  matchesFilters,
+  scopeAccepts,
+  splitQuery,
+  suggestValues,
+} from "./filters";
 import type CrispSearchPlugin from "./main";
 import { PANEL_MENU_ICON } from "./icon";
 import { newNoteName } from "./note-name";
@@ -53,7 +66,21 @@ interface MoreItem {
   total: number;
 }
 
-type Item = FileItem | CommandItem | CreateItem | QueryItem | MoreItem;
+// A value for the filter being typed ("#读", "path:raw"); choosing it adds the filter.
+interface SuggestItem {
+  type: "suggest";
+  section: string;
+  kind: FilterKind;
+  value: string;
+}
+
+type Item = FileItem | CommandItem | CreateItem | QueryItem | MoreItem | SuggestItem;
+
+const FILTER_ICONS: Record<FilterKind, string> = { tag: "tag", path: "folder", ext: "file-type" };
+
+function filterToken(filter: Filter): string {
+  return `${FILTER_KINDS.find((k) => k.kind === filter.kind)!.prefix}${filter.value}`;
+}
 
 // Recent searches shown under the recent notes in an empty panel.
 const RECENT_QUERY_SHOWN = 3;
@@ -107,6 +134,7 @@ function itemKey(item: Item): string {
   if (item.type === "create") return `create:${item.name}`;
   if (item.type === "query") return `query:${item.query}`;
   if (item.type === "more") return "more";
+  if (item.type === "suggest") return `suggest:${item.kind}:${item.value}`;
   return item.hit ? `hit:${item.file.path}:${item.hit.line}` : `file:${item.file.path}`;
 }
 
@@ -150,6 +178,14 @@ export class LauncherModal extends Modal {
   private readonly createActions: Action<CreateItem>[];
   private readonly queryActions: Action<QueryItem>[];
   private readonly moreActions: Action<MoreItem>[];
+  private readonly suggestActions: Action<SuggestItem>[];
+  private scopesEl!: HTMLElement;
+  private chipsEl!: HTMLElement;
+  // The tab picked for this panel, and the filters shown as chips before the field.
+  private tab: SearchScope = "all";
+  private filters: Filter[] = [];
+  // Tag, folder and extension counts for suggestions, gathered once per panel.
+  private filterValues: Partial<Record<FilterKind, Map<string, number>>> = {};
   // Set when the list is cut and Obsidian's search is off, so the count shows as plain text instead.
   private cutNotice = "";
   // What the shown results were searched with; see update().
@@ -180,6 +216,7 @@ export class LauncherModal extends Modal {
       { label: "在新标签页新建", icon: "plus-square", keys: MODE_KEYS.tab, run: (item) => void this.createNote(item, "tab") },
       { label: "在右侧新建", icon: "columns-2", keys: MODE_KEYS.split, run: (item) => void this.createNote(item, "split") },
     ];
+    this.suggestActions = [{ label: "添加筛选", icon: "list-filter", keys: ["↵"], run: (item) => this.applySuggestion(item) }];
     this.moreActions = [{ label: "在 Obsidian 搜索中查看", icon: "search", keys: ["↵"], run: () => this.openGlobalSearch() }];
     this.queryActions = [
       { label: "搜索", icon: "search", keys: ["↵"], run: (item) => this.searchAgain(item) },
@@ -194,12 +231,13 @@ export class LauncherModal extends Modal {
 
     const bar = this.modalEl.createDiv("crisp-search-bar");
     setIcon(bar.createSpan("crisp-search-bar-icon"), "search");
+    this.chipsEl = bar.createDiv("crisp-search-chips");
     this.idPrefix = `crisp-search-${++instanceCount}`;
     this.input = bar.createEl("input", {
       cls: "crisp-search-input",
       type: "text",
       attr: {
-        placeholder: "搜索笔记、内容和命令…",
+        placeholder: "搜索笔记、内容和命令，输入 / 筛选",
         spellcheck: "false",
         enterkeyhint: "go",
         role: "combobox",
@@ -210,6 +248,15 @@ export class LauncherModal extends Modal {
       },
     });
     this.statusEl = bar.createSpan("crisp-search-status");
+
+    this.scopesEl = this.modalEl.createDiv({ cls: "crisp-search-scopes", attr: { role: "tablist" } });
+    for (const [scope, label] of SCOPES) {
+      const tab = this.scopesEl.createDiv({ cls: "crisp-search-scope", text: label, attr: { role: "tab", "data-scope": scope } });
+      tab.addEventListener("click", () => {
+        this.setScope(scope);
+        this.input.focus();
+      });
+    }
 
     this.listEl = this.modalEl.createDiv({ cls: "crisp-search-list", attr: { id: `${this.idPrefix}-list`, role: "listbox" } });
 
@@ -380,6 +427,29 @@ export class LauncherModal extends Modal {
       }
       return;
     }
+    // Tab and ⇧Tab move between the type tabs.
+    if (evt.key === "Tab" && !Keymap.isModEvent(evt) && !evt.altKey) {
+      evt.preventDefault();
+      const at = SCOPES.findIndex(([scope]) => scope === this.activeScope());
+      this.setScope(SCOPES[(at + (evt.shiftKey ? SCOPES.length - 1 : 1)) % SCOPES.length][0]);
+      return;
+    }
+    const caret = this.input.selectionStart ?? 0;
+    const collapsed = caret === this.input.selectionEnd;
+    // Backspace at the start of the field takes back the last filter chip.
+    if (evt.key === "Backspace" && collapsed && caret === 0 && this.filters.length) {
+      evt.preventDefault();
+      this.filters.pop();
+      this.update();
+      return;
+    }
+    // "/" where a word starts opens the filter menu; inside a word such as "raw/inbox" it is typed as usual.
+    const wordStart = caret === 0 || /\s/.test(this.input.value[caret - 1]);
+    if (evt.key === "/" && collapsed && wordStart && !Keymap.isModEvent(evt) && !evt.altKey && !this.commandScope() && !this.drill) {
+      evt.preventDefault();
+      this.showFilterMenu();
+      return;
+    }
     // → at the end of the field opens a body result's hit list; ← goes back from it.
     const atEnd = this.input.selectionStart === this.input.value.length && this.input.selectionEnd === this.input.value.length;
     if (evt.key === "ArrowRight" && atEnd && !evt.shiftKey && hasMoreHits(this.items[this.selected])) {
@@ -424,12 +494,22 @@ export class LauncherModal extends Modal {
   // Searches again and redraws, unless nothing that decides the results has changed since the last search:
   // a trailing space, an IME's extra input event or an index report that touched nothing.
   private update(): void {
+    this.takeFilters();
     const raw = this.input.value.trimStart();
-    const commandMode = COMMAND_PREFIX.test(raw);
-    const query = (commandMode ? raw.slice(1) : raw).trim();
-    const key = query
-      ? [commandMode, query, this.drill ? itemKey(this.drill.item) : "", this.sortOrder, this.plugin.licensed, this.plugin.engine.version].join("\u0000")
-      : null;
+    const commandMode = this.commandScope();
+    const typed = (COMMAND_PREFIX.test(raw) ? raw.slice(1) : raw).trim();
+    // Outside commands the field holds search words, and perhaps a filter still being typed at its end.
+    const parsed = commandMode ? null : splitQuery(this.input.value);
+    const suggestions = parsed?.pending && !this.drill ? this.suggestionItems(parsed.pending) : [];
+    // A filter token with no matching value is searched as the text it is.
+    const query = parsed ? (parsed.pending && !suggestions.length ? typed : parsed.text) : typed;
+    this.renderScopes();
+    const filtered = this.filters.length > 0;
+    const key =
+      query || filtered || suggestions.length
+        ? [commandMode, this.input.value.trim(), this.tab, JSON.stringify(this.filters), this.drill ? itemKey(this.drill.item) : "",
+            this.sortOrder, this.plugin.licensed, this.plugin.engine.version].join("\u0000")
+        : null;
     if (key !== null && key === this.lastSearch) return;
     this.lastSearch = key;
     this.refreshPending = false;
@@ -443,7 +523,8 @@ export class LauncherModal extends Modal {
     this.modalEl.removeClass("is-locked");
     if (this.drill) this.items = this.hitItems(this.drill.item, query);
     else if (commandMode) this.items = this.commandItems(query, Infinity);
-    else this.items = query ? this.searchItems(query) : this.recentItems();
+    else if (suggestions.length) this.items = suggestions;
+    else this.items = query || filtered ? this.searchItems(query) : this.recentItems();
     this.selected = 0;
     this.render(query, commandMode);
   }
@@ -494,9 +575,13 @@ export class LauncherModal extends Modal {
     const items: Item[] = [];
     for (const path of this.app.workspace.getLastOpenFiles()) {
       const file = this.app.vault.getAbstractFileByPath(path);
-      if (file instanceof TFile && !this.plugin.isIgnored(file.path)) items.push({ type: "file", section: "最近", file });
+      if (!(file instanceof TFile) || this.plugin.isIgnored(file.path)) continue;
+      // The attachment tab lists recent attachments, the note and content tabs recent notes.
+      if (this.tab !== "all" && (this.tab === "attachments") === isNote(file.extension)) continue;
+      items.push({ type: "file", section: "最近", file });
       if (items.length >= RECENT_LIMIT) break;
     }
+    if (this.tab !== "all") return items;
     for (const query of this.plugin.recentQueries.slice(0, RECENT_QUERY_SHOWN)) {
       items.push({ type: "query", section: "最近搜索", query });
     }
@@ -514,23 +599,38 @@ export class LauncherModal extends Modal {
       const file = this.app.vault.getAbstractFileByPath(path);
       return file instanceof TFile ? file.stat : undefined;
     };
-    // Exclusions apply as soon as they change, before the index has caught up.
-    const keep = (path: string) => !this.plugin.isIgnored(path);
-    const page = this.plugin.engine.searchPage(query, undefined, resultOrder(this.sortOrder, stat), keep);
+    const engine = this.plugin.engine;
+    // Exclusions apply as soon as they change, before the index has caught up; filters narrow it further.
+    const keep = (path: string) => {
+      if (this.plugin.isIgnored(path)) return false;
+      const doc = this.filters.length ? engine.doc(path) : undefined;
+      return !doc || matchesFilters(doc, this.filters);
+    };
+    const scope = this.tab;
+    // Filters with no words list files, in the chosen time or name order, or newest first.
+    const listOrder: SortOrder = ["modified", "created", "name"].includes(this.sortOrder) ? this.sortOrder : "modified";
+    const page = query
+      ? engine.searchPage(query, { order: resultOrder(this.sortOrder, stat), keep, accept: (r) => scopeAccepts(scope, r.kind, r.extension) })
+      : engine.listPage({
+          order: resultOrder(listOrder, stat),
+          keep,
+          accept: (r) => scope === "all" || (scope === "attachments") !== isNote(r.extension),
+        });
     for (const result of page.results) {
       const file = this.app.vault.getAbstractFileByPath(result.path);
       if (!(file instanceof TFile)) continue;
       if (result.kind === "title") titles.push({ type: "file", section: "笔记", file, result });
       else bodies.push({ type: "file", section: "内容", file, result });
     }
-    const items: Item[] = [...titles, ...this.commandItems(query, MIXED_COMMAND_LIMIT), ...bodies];
+    const commands = scope === "all" && query && !this.filters.length ? this.commandItems(query, MIXED_COMMAND_LIMIT) : [];
+    const items: Item[] = [...titles, ...commands, ...bodies];
     if (page.total > page.results.length) {
       const shown = page.results.length;
       if (this.globalSearch()) items.push({ type: "more", section: "", shown, total: page.total });
       else this.cutNotice = `共 ${page.total.toLocaleString()} 条结果，这里显示前 ${shown} 条`;
     }
     // A note already named this way is the result to open, not one to create again.
-    const name = newNoteName(query, this.app.vault.getFiles());
+    const name = scope === "all" || scope === "notes" ? newNoteName(query, this.app.vault.getFiles()) : "";
     if (name) items.push({ type: "create", section: "", name });
     return items;
   }
@@ -570,7 +670,7 @@ export class LauncherModal extends Modal {
     if (this.items.every((item) => item.type === "create")) {
       // An emptied hit list keeps its header, so there is still a way back.
       if (this.drill) this.renderSection(this.drill.item.file.basename);
-      if (query || commandMode || this.drill) {
+      if (query || commandMode || this.drill || this.filters.length) {
         const text = commandMode || this.plugin.ready ? "没有结果" : "正在建立索引…";
         this.listEl.createDiv({ cls: "crisp-search-empty", text });
       }
@@ -591,6 +691,8 @@ export class LauncherModal extends Modal {
               ? this.renderQueryRow(item, index)
               : item.type === "more"
                 ? this.renderMoreRow(item, index)
+                : item.type === "suggest"
+                  ? this.renderSuggestRow(item, index)
             : item.hit
             ? this.renderHitRow(item, item.hit, index)
             : this.renderFileRow(item, index, query);
@@ -647,6 +749,15 @@ export class LauncherModal extends Modal {
     return row;
   }
 
+  private renderSuggestRow(item: SuggestItem, index: number): HTMLElement {
+    const row = this.createRow(index, FILTER_ICONS[item.kind]);
+    const text = item.kind === "tag" ? `#${item.value}` : item.value;
+    row.createDiv("crisp-search-item-text").createSpan({ cls: "crisp-search-item-title", text });
+    const count = this.filterValues[item.kind]?.get(item.value);
+    if (count) row.createDiv({ cls: "crisp-search-item-accessory", text: `${count.toLocaleString()} 个文件` });
+    return row;
+  }
+
   private renderMoreRow(item: MoreItem, index: number): HTMLElement {
     const row = this.createRow(index, "search");
     row.addClass("is-more");
@@ -697,7 +808,7 @@ export class LauncherModal extends Modal {
     this.input.setAttr("aria-activedescendant", row.id);
     if (scroll) row.scrollIntoView({ block: "nearest" });
     const type = this.items[index].type;
-    const labels: Record<Item["type"], string> = { command: "运行", create: "新建", query: "搜索", file: "打开", more: "查看" };
+    const labels: Record<Item["type"], string> = { command: "运行", create: "新建", query: "搜索", file: "打开", more: "查看", suggest: "添加" };
     this.primaryLabel?.setText(labels[type]);
   }
 
@@ -719,6 +830,7 @@ export class LauncherModal extends Modal {
     if (item.type === "create") return this.createActions as Action[];
     if (item.type === "query") return this.queryActions as Action[];
     if (item.type === "more") return this.moreActions as Action[];
+    if (item.type === "suggest") return this.suggestActions as Action[];
     // Inserting needs a note open in an editor behind the panel.
     const fileActions = this.app.workspace.activeEditor?.editor
       ? this.fileActions
@@ -791,6 +903,7 @@ export class LauncherModal extends Modal {
     else if (item.type === "create") void this.createNote(item, mode);
     else if (item.type === "query") this.searchAgain(item);
     else if (item.type === "more") this.openGlobalSearch();
+    else if (item.type === "suggest") this.applySuggestion(item);
     else void this.openFile(item, mode);
   }
 
@@ -904,8 +1017,10 @@ export class LauncherModal extends Modal {
 
   // Only a search that led somewhere is remembered; command searches are not.
   private rememberQuery(): void {
-    const raw = this.input.value.trim();
-    if (raw && !COMMAND_PREFIX.test(raw)) this.plugin.recordQuery(raw);
+    if (this.commandScope()) return;
+    // Kept as typed text, filters first, so choosing it again brings the chips back.
+    const text = [...this.filters.map(filterToken), this.input.value.trim()].filter(Boolean).join(" ");
+    if (text) this.plugin.recordQuery(text);
   }
 
   // Obsidian's core search, when it is turned on; it has no public API.
@@ -918,19 +1033,139 @@ export class LauncherModal extends Modal {
     return instance?.openGlobalSearch ? (instance as { openGlobalSearch(query: string): void }) : null;
   }
 
+  // Obsidian's search takes tags and folders in its own syntax; it has no extension filter.
   private openGlobalSearch(): void {
-    const query = this.input.value.trim();
+    const outside = this.filters.flatMap((filter) =>
+      filter.kind === "tag" ? [`tag:#${filter.value}`] : filter.kind === "path" ? [`path:"${filter.value}"`] : [],
+    );
+    const query = [...outside, this.input.value.trim()].filter(Boolean).join(" ");
     this.rememberQuery();
     this.close();
     this.globalSearch()?.openGlobalSearch(query);
   }
 
   private searchAgain(item: QueryItem): void {
-    this.input.value = item.query;
+    // A trailing space finishes any filter token, so a remembered "#读书 预算" comes back as a chip.
+    this.input.value = `${item.query} `;
     this.drill = null;
     this.update();
     this.input.focus();
-    this.input.setSelectionRange(item.query.length, item.query.length);
+    const end = this.input.value.length;
+    this.input.setSelectionRange(end, end);
+  }
+
+  private commandScope(): boolean {
+    return this.tab === "commands" || COMMAND_PREFIX.test(this.input.value.trimStart());
+  }
+
+  // The tab shown as current: typing ">" lists commands whichever tab was picked.
+  private activeScope(): SearchScope {
+    return COMMAND_PREFIX.test(this.input.value.trimStart()) ? "commands" : this.tab;
+  }
+
+  private setScope(scope: SearchScope): void {
+    // Leaving the command list drops the ">" that put the panel there.
+    if (scope !== "commands") this.input.value = this.input.value.trimStart().replace(COMMAND_PREFIX, "");
+    this.tab = scope;
+    this.drill = null;
+    this.update();
+  }
+
+  private renderScopes(): void {
+    const active = this.activeScope();
+    for (const tab of Array.from(this.scopesEl.children) as HTMLElement[]) {
+      const on = tab.dataset.scope === active;
+      tab.toggleClass("is-active", on);
+      tab.setAttr("aria-selected", String(on));
+    }
+    this.chipsEl.empty();
+    this.filters.forEach((filter, index) => {
+      const chip = this.chipsEl.createSpan({ cls: "crisp-search-chip", text: filterLabel(filter) });
+      const remove = chip.createSpan({ cls: "crisp-search-chip-remove", attr: { "aria-label": "移除筛选" } });
+      setIcon(remove, "x");
+      remove.addEventListener("click", () => {
+        this.filters.splice(index, 1);
+        this.update();
+        this.input.focus();
+      });
+    });
+  }
+
+  // Finished filter tokens in the field ("#读书 ", "path:raw ") turn into chips; the rest of the text stays.
+  private takeFilters(): void {
+    if (this.commandScope() || this.composing) return;
+    const value = this.input.value;
+    const { filters } = splitQuery(value);
+    if (!filters.length) return;
+    for (const filter of filters) this.addFilter(filter);
+    const open = !/\s$/.test(value);
+    const tokens = value.split(/\s+/).filter(Boolean);
+    const kept = tokens.filter((token, index) => (open && index === tokens.length - 1) || !splitQuery(`${token} `).filters.length);
+    this.input.value = kept.join(" ") + (open || !kept.length ? "" : " ");
+    const end = this.input.value.length;
+    this.input.setSelectionRange(end, end);
+  }
+
+  private addFilter(filter: Filter): void {
+    const same = (other: Filter) => other.kind === filter.kind && other.value.toLowerCase() === filter.value.toLowerCase();
+    if (!this.filters.some(same)) this.filters.push(filter);
+  }
+
+  private showFilterMenu(): void {
+    const menu = new Menu();
+    for (const { kind, label, prefix } of FILTER_KINDS) {
+      menu.addItem((menuItem) =>
+        menuItem
+          .setTitle(label)
+          .setIcon(FILTER_ICONS[kind])
+          .onClick(() => {
+            const caret = this.input.selectionStart ?? this.input.value.length;
+            const value = this.input.value;
+            this.input.value = value.slice(0, caret) + prefix + value.slice(caret);
+            this.input.setSelectionRange(caret + prefix.length, caret + prefix.length);
+            this.update();
+          }),
+      );
+    }
+    menu.onHide(() => this.input.focus());
+    const rect = this.input.getBoundingClientRect();
+    menu.showAtPosition({ x: rect.left, y: rect.bottom + 6 }, this.input.doc);
+  }
+
+  private valuesFor(kind: FilterKind): Map<string, number> {
+    const cached = this.filterValues[kind];
+    if (cached) return cached;
+    const counts = new Map<string, number>();
+    const bump = (value: string) => counts.set(value, (counts.get(value) ?? 0) + 1);
+    if (kind === "tag") {
+      const tags = (this.app.metadataCache as unknown as { getTags?: () => Record<string, number> }).getTags?.() ?? {};
+      for (const [tag, count] of Object.entries(tags)) counts.set(tag.replace(/^#/, ""), count);
+    } else {
+      for (const file of this.app.vault.getFiles()) {
+        if (this.plugin.isIgnored(file.path)) continue;
+        if (kind === "ext") bump(file.extension.toLowerCase());
+        // A file counts toward every folder above it.
+        else for (let folder = file.parent; folder && !folder.isRoot(); folder = folder.parent) bump(folder.path);
+      }
+    }
+    this.filterValues[kind] = counts;
+    return counts;
+  }
+
+  private suggestionItems(pending: Filter): SuggestItem[] {
+    const section = FILTER_KINDS.find((k) => k.kind === pending.kind)!.label;
+    const values = suggestValues(pending.value, this.valuesFor(pending.kind));
+    return values.map((value) => ({ type: "suggest", section, kind: pending.kind, value }));
+  }
+
+  // Replaces the token being typed with a chip.
+  private applySuggestion(item: SuggestItem): void {
+    this.addFilter({ kind: item.kind, value: item.value });
+    const tokens = this.input.value.replace(/\s+$/, "").split(/\s+/);
+    tokens.pop();
+    this.input.value = tokens.join(" ") + (tokens.length ? " " : "");
+    this.update();
+    this.input.focus();
   }
 
   private forgetQuery(item: QueryItem): void {
