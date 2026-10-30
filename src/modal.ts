@@ -3,6 +3,7 @@ import { CommandIndex, CommandMatch, isCommandAvailable } from "./commands";
 import { Excerpt, MAX_HITS, SearchResult, highlightRanges, highlightSegments } from "./engine";
 import type CrispSearchPlugin from "./main";
 import { PANEL_MENU_ICON } from "./icon";
+import { newNoteName } from "./note-name";
 import { SORT_ORDERS, SortOrder, resultOrder } from "./sort";
 
 const RECENT_LIMIT = 8;
@@ -73,13 +74,6 @@ function hotkeyKeys(hotkey: Hotkey): string[] {
 }
 
 const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "heic"]);
-
-// Characters a file name cannot hold, plus those that break a [[link]].
-const UNSAFE_NAME = /[\\/:*?"<>|#^[\]]/g;
-
-function noteName(query: string): string {
-  return query.replace(UNSAFE_NAME, " ").replace(/\s+/g, " ").trim().replace(/^\.+/, "").slice(0, 200).trim();
-}
 
 function iconFor(file: TFile): string {
   if (file.extension === "md") return "file-text";
@@ -489,7 +483,9 @@ export class LauncherModal extends Modal {
       const file = this.app.vault.getAbstractFileByPath(path);
       return file instanceof TFile ? file.stat : undefined;
     };
-    for (const result of this.plugin.engine.search(query, undefined, resultOrder(this.sortOrder, stat))) {
+    // Exclusions apply as soon as they change, before the index has caught up.
+    const keep = (path: string) => !this.plugin.isIgnored(path);
+    for (const result of this.plugin.engine.search(query, undefined, resultOrder(this.sortOrder, stat), keep)) {
       const file = this.app.vault.getAbstractFileByPath(result.path);
       if (!(file instanceof TFile)) continue;
       if (result.kind === "title") titles.push({ type: "file", section: "笔记", file, result });
@@ -497,11 +493,8 @@ export class LauncherModal extends Modal {
     }
     const items: Item[] = [...titles, ...this.commandItems(query, MIXED_COMMAND_LIMIT), ...bodies];
     // A note already named this way is the result to open, not one to create again.
-    const name = noteName(query);
-    const lower = name.toLowerCase();
-    if (name && !titles.some((item) => item.file.basename.toLowerCase() === lower)) {
-      items.push({ type: "create", section: "", name });
-    }
+    const name = newNoteName(query, this.app.vault.getFiles());
+    if (name) items.push({ type: "create", section: "", name });
     return items;
   }
 

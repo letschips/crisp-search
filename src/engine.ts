@@ -375,11 +375,14 @@ export class SearchEngine {
     const slash = doc.path.lastIndexOf("/");
     const folder = slash === -1 ? "" : doc.path.slice(0, slash);
     const pinyin = [...pinyinKeys(doc.basename), ...doc.aliases.flatMap(pinyinKeys)];
-    this.titleKeys.set(doc.path, { text: [doc.basename, ...doc.aliases, folder].join("\n").toLowerCase(), pinyin });
+    // The full file name counts as a name too, so "photo.png" finds the image it names.
+    const filename = `${doc.basename}.${doc.extension}`;
+    this.titleKeys.set(doc.path, { text: [doc.basename, filename, ...doc.aliases, folder].join("\n").toLowerCase(), pinyin });
     const { frontmatter, body } = splitFrontmatter(doc.content);
     this.index.add({
       path: doc.path,
-      basename: doc.basename,
+      // Attachments are searched by name only, extension included; ".md" on every note would only add noise.
+      basename: doc.extension === "md" ? doc.basename : filename,
       aliases: doc.aliases.join(" "),
       pinyin: pinyin.join(" "),
       headings: doc.headings.map((h) => h.text).join("\n"),
@@ -426,8 +429,15 @@ export class SearchEngine {
     return [...this.docs.keys()];
   }
 
-  // `order` replaces the relevance order and is applied before `limit`, so the cut keeps what it puts first.
-  search(query: string, limit = 60, order?: (a: SearchResult, b: SearchResult) => number): SearchResult[] {
+  // Name matches come first and `order` sorts within each group (relevance by default), both before `limit`,
+  // so the cut never drops a name match the panel would list first. `keep` drops paths the caller no longer
+  // searches, such as newly excluded folders whose entries have not been removed yet.
+  search(
+    query: string,
+    limit = 60,
+    order?: (a: SearchResult, b: SearchResult) => number,
+    keep?: (path: string) => boolean,
+  ): SearchResult[] {
     const parts = queryParts(query);
     if (parts.length === 0) return [];
     const hits = this.index.search(parts.join(" "), SEARCH_OPTIONS);
@@ -435,7 +445,7 @@ export class SearchEngine {
     const results: SearchResult[] = [];
     for (const hit of hits) {
       const doc = this.docs.get(hit.id as string);
-      if (!doc) continue;
+      if (!doc || (keep && !keep(doc.path))) continue;
       const fields = new Set(Object.values(hit.match).flat());
       // A title hit needs every query word answered by the name, aliases or folder; otherwise the body
       // carries part of the match and the result must show where.
@@ -448,8 +458,9 @@ export class SearchEngine {
             : "content";
       // Bigram AND also matches scattered characters; a literal phrase is what the user meant.
       const title = doc.basename.toLowerCase();
+      const phrase = lowerParts.join(" ");
       let score = hit.score;
-      if (title === lowerParts.join(" ")) score *= 3;
+      if (title === phrase || `${title}.${doc.extension}` === phrase) score *= 3;
       else if (lowerParts.every((p) => title.includes(p))) score *= 2;
       else {
         const lowerContent = doc.content.toLowerCase();
@@ -457,7 +468,9 @@ export class SearchEngine {
       }
       results.push({ path: doc.path, basename: doc.basename, extension: doc.extension, kind, score, terms: hit.terms });
     }
-    results.sort(order ?? ((a, b) => b.score - a.score));
+    const within = order ?? ((a: SearchResult, b: SearchResult) => b.score - a.score);
+    const group = (r: SearchResult) => (r.kind === "title" ? 0 : 1);
+    results.sort((a, b) => group(a) - group(b) || within(a, b));
     const top = results.slice(0, limit);
     for (const result of top) {
       const doc = this.docs.get(result.path)!;

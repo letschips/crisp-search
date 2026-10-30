@@ -1,6 +1,7 @@
 import {
   CachedMetadata,
   Command,
+  EventRef,
   Hotkey,
   Notice,
   Plugin,
@@ -313,13 +314,19 @@ export default class CrispSearchPlugin extends Plugin {
     void this.saveSettings();
   }
 
-  // A running index is rebuilt so the new list applies at once; its last step drops what is now excluded.
+  // Newly excluded files leave the index at once; the re-index then adds files no longer excluded.
   async setExcludedFolders(folders: string[]): Promise<void> {
     const next = folderList(folders);
     if (next.join("\n") === this.settings.excludedFolders.join("\n")) return;
     this.settings.excludedFolders = next;
     void this.saveSettings();
-    if (this.indexStarted) await this.rebuildIndex();
+    await this.applyExclusions();
+  }
+
+  private applyExclusions(): Promise<void> {
+    if (!this.indexStarted) return Promise.resolve();
+    for (const path of this.engine.paths()) if (this.isIgnored(path)) this.removePath(path);
+    return this.rebuildIndex();
   }
 
   onProgress(listener: () => void): () => void {
@@ -354,6 +361,15 @@ export default class CrispSearchPlugin extends Plugin {
   // Registered once the layout is ready, so the vault's start-up create events are not replayed here.
   // Until a licence starts the index, events are ignored: an unactivated copy indexes nothing.
   private watchVault(): void {
+    // Obsidian's own excluded files changed (Settings → Files and links); it sends no file events for that.
+    const vault = this.app.vault as unknown as { on(name: "config-changed", callback: (key: string) => void): EventRef };
+    this.registerEvent(
+      vault.on("config-changed", (key) => {
+        if (key !== "userIgnoreFilters") return;
+        (this.app.metadataCache as unknown as { updateUserIgnoreFilters?: () => void }).updateUserIgnoreFilters?.();
+        void this.applyExclusions();
+      }),
+    );
     this.registerEvent(this.app.vault.on("create", (file) => this.indexStarted && this.onFileEvent(file)));
     this.registerEvent(this.app.vault.on("delete", (file) => this.indexStarted && this.removePath(file.path)));
     this.registerEvent(
@@ -375,8 +391,16 @@ export default class CrispSearchPlugin extends Plugin {
     );
   }
 
+  // The latest re-index, for callers that need to wait for it.
+  indexing: Promise<void> = Promise.resolve();
+
   // Re-reads every file. Results stay searchable meanwhile; files gone from the vault are dropped at the end.
-  async rebuildIndex(): Promise<void> {
+  rebuildIndex(): Promise<void> {
+    this.indexing = this.runIndex();
+    return this.indexing;
+  }
+
+  private async runIndex(): Promise<void> {
     // From the first pass on, vault events keep the index current.
     this.indexStarted = true;
     const generation = ++this.generation;

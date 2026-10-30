@@ -312,3 +312,34 @@ test("a caller's order is applied before the limit, so the cut keeps what that o
   assert.equal(results[0].path, "n69.md");
   assert.equal(results.at(-1).path, "n10.md");
 });
+
+test("B1: title hits are kept before the cut, whatever order the body results take", () => {
+  const bodies = Array.from({ length: 60 }, (_, i) => doc(`b${String(i).padStart(2, "0")}.md`, "needle in the text"));
+  const engine = engineWith(doc("needle.md", "nothing else"), ...bodies);
+  const bodyFirst = (a, b) => (a.path === "needle.md" ? 1 : b.path === "needle.md" ? -1 : 0);
+  const results = engine.search("needle", 60, bodyFirst);
+  assert.equal(results.length, 60);
+  assert.equal(results[0].path, "needle.md");
+  assert.equal(results[0].kind, "title");
+});
+
+test("B3: results the caller no longer wants are dropped before the cut", () => {
+  const engine = engineWith(doc("private/secret.md", "needle"), ...Array.from({ length: 60 }, (_, i) => doc(`n${i}.md`, "needle")));
+  const results = engine.search("needle", 60, undefined, (path) => !path.startsWith("private/"));
+  assert.equal(results.length, 60);
+  assert.ok(results.every((r) => !r.path.startsWith("private/")));
+});
+
+test("B4: an attachment is found by its full file name, as a name match", () => {
+  const engine = engineWith(
+    doc("assets/photo.png", "", { extension: "png" }),
+    doc("assets/Crisp-Focus.jpg", "", { extension: "jpg" }),
+    doc("refs/paper.pdf", "", { extension: "pdf" }),
+    doc("note.md", "see photo.png for details"),
+  );
+  for (const [query, path] of [["photo.png", "assets/photo.png"], ["Crisp-Focus.jpg", "assets/Crisp-Focus.jpg"], ["paper.pdf", "refs/paper.pdf"], ["photo", "assets/photo.png"]]) {
+    const [first] = engine.search(query);
+    assert.equal(first?.path, path, query);
+    assert.equal(first.kind, "title", query);
+  }
+});

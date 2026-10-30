@@ -301,3 +301,34 @@ test("recent searches are kept most recent first, once each, and capped", async 
   await plugin.saving;
   assert.deepEqual(plugin.saved.at(-1).recentQueries, []);
 });
+
+test("B3: newly excluded folders leave the index before the re-index finishes", async () => {
+  let release;
+  const gate = new Promise((r) => (release = r));
+  let held = false;
+  const { plugin } = await setup({
+    paths: ["private/secret.md", "notes/a.md"],
+    read: async (file) => {
+      if (held) await gate;
+      return `needle ${file.basename}`;
+    },
+  });
+  await plugin.rebuildIndex();
+  held = true;
+  const pending = plugin.setExcludedFolders(["private"]);
+  assert.equal(plugin.engine.has("private/secret.md"), false);
+  release();
+  await pending;
+  assert.deepEqual(plugin.engine.paths(), ["notes/a.md"]);
+});
+
+test("B3: a change to Obsidian's excluded files re-indexes, including files no longer excluded", async () => {
+  let ignore = "notes/";
+  const { plugin, events } = await setup({ paths: ["notes/a.md", "b.md"], ignored: (p) => !!ignore && p.startsWith(ignore) });
+  await plugin.rebuildIndex();
+  assert.deepEqual(plugin.engine.paths(), ["b.md"]);
+  ignore = "";
+  events["vault:config-changed"]("userIgnoreFilters");
+  await plugin.indexing;
+  assert.deepEqual(plugin.engine.paths().sort(), ["b.md", "notes/a.md"]);
+});
