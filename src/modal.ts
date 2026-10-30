@@ -11,6 +11,7 @@ const RECENT_LIMIT = 8;
 const MIXED_COMMAND_LIMIT = 4;
 const COMMAND_PREFIX = /^[>》]/;
 let instanceCount = 0;
+const REFRESH_MS = 250;
 
 type OpenMode = "current" | "tab" | "split";
 
@@ -151,6 +152,9 @@ export class LauncherModal extends Modal {
   private readonly moreActions: Action<MoreItem>[];
   // Set when the list is cut and Obsidian's search is off, so the count shows as plain text instead.
   private cutNotice = "";
+  // What the shown results were searched with; see update().
+  private lastSearch: string | null = null;
+  private refreshTimer: number | null = null;
   // A sort picked in the panel lasts until it closes; the setting is the default.
   private sortOverride: SortOrder | null = null;
   private primaryLabel: HTMLElement | null = null;
@@ -295,11 +299,13 @@ export class LauncherModal extends Modal {
 
   onClose(): void {
     this.stopProgress?.();
+    if (this.refreshTimer !== null) activeWindow.clearTimeout(this.refreshTimer);
+    this.refreshTimer = null;
     if (this.escapeScope) this.app.keymap.popScope(this.escapeScope);
   }
 
-  // Index changes refresh file results but keep the selection; while the action menu is open the
-  // refresh waits and runs when the menu closes.
+  // Index changes refresh file results but keep the selection. Indexing reports every few milliseconds, so
+  // refreshes are gathered into one per REFRESH_MS; while the action menu is open the refresh waits for it.
   private onIndexProgress(): void {
     if (this.lockedShown !== !this.plugin.licensed) {
       this.renderStatus();
@@ -307,10 +313,14 @@ export class LauncherModal extends Modal {
       return;
     }
     this.renderStatus();
-    // Mid-composition the field holds raw pinyin; compositionend searches with the committed text anyway.
-    if (this.composing || !this.input.value.trim() || this.commandMode()) return;
-    if (this.actionsOpen) this.refreshPending = true;
-    else this.refreshKeepingSelection();
+    if (this.refreshTimer !== null) return;
+    this.refreshTimer = activeWindow.setTimeout(() => {
+      this.refreshTimer = null;
+      // Mid-composition the field holds raw pinyin; compositionend searches with the committed text anyway.
+      if (this.composing || !this.input.value.trim() || this.commandMode()) return;
+      if (this.actionsOpen) this.refreshPending = true;
+      else this.refreshKeepingSelection();
+    }, REFRESH_MS);
   }
 
   private refreshKeepingSelection(): void {
@@ -411,10 +421,17 @@ export class LauncherModal extends Modal {
     return row ? Number(row.dataset.index) : -1;
   }
 
+  // Searches again and redraws, unless nothing that decides the results has changed since the last search:
+  // a trailing space, an IME's extra input event or an index report that touched nothing.
   private update(): void {
     const raw = this.input.value.trimStart();
     const commandMode = COMMAND_PREFIX.test(raw);
     const query = (commandMode ? raw.slice(1) : raw).trim();
+    const key = query
+      ? [commandMode, query, this.drill ? itemKey(this.drill.item) : "", this.sortOrder, this.plugin.licensed, this.plugin.engine.version].join("\u0000")
+      : null;
+    if (key !== null && key === this.lastSearch) return;
+    this.lastSearch = key;
     this.refreshPending = false;
     this.cutNotice = "";
     this.toggleActions(false);

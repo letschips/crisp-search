@@ -35,7 +35,13 @@ export function resultOrder<T extends Ranked>(
   stat: (path: string) => Stat,
   now = Date.now(),
 ): ((a: T, b: T) => number) | undefined {
-  const time = (key: "mtime" | "ctime") => (a: T, b: T) => (stat(b.path)?.[key] ?? 0) - (stat(a.path)?.[key] ?? 0);
+  // Each path is looked up once per sort, not on every comparison.
+  const stats = new Map<string, Stat>();
+  const cached = (path: string) => {
+    if (!stats.has(path)) stats.set(path, stat(path));
+    return stats.get(path);
+  };
+  const time = (key: "mtime" | "ctime") => (a: T, b: T) => (cached(b.path)?.[key] ?? 0) - (cached(a.path)?.[key] ?? 0);
   switch (order) {
     case "relevance":
       return undefined;
@@ -47,7 +53,7 @@ export function resultOrder<T extends Ranked>(
       return (a, b) => names.compare(a.basename, b.basename);
     case "recent": {
       const boosted = (r: T) => {
-        const age = Math.max(0, now - (stat(r.path)?.mtime ?? 0)) / DAY;
+        const age = Math.max(0, now - (cached(r.path)?.mtime ?? 0)) / DAY;
         return r.score * (1 + RECENT_BOOST * 0.5 ** (age / HALF_LIFE_DAYS));
       };
       return (a, b) => boosted(b) - boosted(a);

@@ -352,3 +352,10 @@ test("the full number of matches is reported next to the cut list, after the cal
   assert.deepEqual(engine.searchPage("needle", 100).total, 75);
   assert.equal(engine.searchPage("", 60).total, 0);
 });
+
+test("the literal-word bonus ignores case and takes regex characters literally", () => {
+  const engine = engineWith(doc("fuzzy.md", "obsidiam notes"), doc("literal.md", "OBSIDIAN notes"), doc("plus.md", "C++ (and more)"));
+  assert.equal(engine.search("obsidian")[0].path, "literal.md");
+  assert.deepEqual(paths(engine.search("C++")), ["plus.md"]);
+  assert.deepEqual(paths(engine.search("(and")), ["plus.md"]);
+});

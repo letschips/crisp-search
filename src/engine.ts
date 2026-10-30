@@ -365,11 +365,15 @@ export class SearchEngine {
     processTerm: (term) => term,
   });
 
+  // Bumped by every write, so a caller can tell whether results it holds may have changed.
+  version = 0;
+
   get size(): number {
     return this.docs.size;
   }
 
   upsert(doc: SearchDoc): void {
+    this.version++;
     if (this.docs.has(doc.path)) this.index.discard(doc.path);
     this.docs.set(doc.path, doc);
     const slash = doc.path.lastIndexOf("/");
@@ -395,6 +399,7 @@ export class SearchEngine {
 
   remove(path: string): void {
     if (!this.docs.delete(path)) return;
+    this.version++;
     this.titleKeys.delete(path);
     this.index.discard(path);
   }
@@ -452,6 +457,8 @@ export class SearchEngine {
     if (parts.length === 0) return { results: [], total: 0 };
     const hits = this.index.search(parts.join(" "), SEARCH_OPTIONS);
     const lowerParts = parts.map((p) => p.toLowerCase());
+    // Case-insensitive patterns test the text in place; lowercasing every matching note costs far more.
+    const literals = parts.map((p) => new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "iu"));
     const results: SearchResult[] = [];
     for (const hit of hits) {
       const doc = this.docs.get(hit.id as string);
@@ -472,10 +479,7 @@ export class SearchEngine {
       let score = hit.score;
       if (title === phrase || `${title}.${doc.extension}` === phrase) score *= 3;
       else if (lowerParts.every((p) => title.includes(p))) score *= 2;
-      else {
-        const lowerContent = doc.content.toLowerCase();
-        if (lowerParts.every((p) => lowerContent.includes(p))) score *= 1.5;
-      }
+      else if (literals.every((literal) => literal.test(doc.content))) score *= 1.5;
       results.push({ path: doc.path, basename: doc.basename, extension: doc.extension, kind, score, terms: hit.terms });
     }
     const within = order ?? ((a: SearchResult, b: SearchResult) => b.score - a.score);
