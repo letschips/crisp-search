@@ -309,8 +309,55 @@ body .crisp-search-container .modal.crisp-search-panel input.crisp-search-input.
   margin-right: 6px;
 }
 
-.crisp-search-footer-action:hover {
+.crisp-search-footer-action:hover,
+.crisp-search-footer-icon:hover {
   background: var(--crisp-search-hover);
+}
+
+/* Bottom left: index and settings menu, and the sort for this panel. */
+
+.crisp-search-footer.is-start {
+  right: auto;
+  left: 12px;
+}
+
+.crisp-search-footer-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.crisp-search-footer-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.crisp-search-footer-action.is-sort {
+  padding: 0 10px 0 12px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.crisp-search-footer-action.is-sort > span {
+  margin-right: 0;
+}
+
+.crisp-search-footer-chevron {
+  display: flex;
+}
+
+.crisp-search-footer-chevron svg {
+  width: 14px;
+  height: 14px;
+}
+
+.crisp-search-item-strong {
+  font-weight: 600;
 }
 
 /* ⌘K actions */

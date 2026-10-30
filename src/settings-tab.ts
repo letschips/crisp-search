@@ -1,7 +1,35 @@
-import { App, Notice, PluginSettingTab, Setting } from "obsidian";
+import { AbstractInputSuggest, App, Notice, PluginSettingTab, Setting, TFolder, normalizePath } from "obsidian";
 import type CrispSearchPlugin from "./main";
+import { SORT_ORDERS, isSortOrder } from "./sort";
 
 const AUTHOR_URL = "https://xhslink.cn/m/3MwtKu4822b";
+
+class FolderSuggest extends AbstractInputSuggest<TFolder> {
+  constructor(
+    app: App,
+    private readonly input: HTMLInputElement,
+  ) {
+    super(app, input);
+  }
+
+  getSuggestions(query: string): TFolder[] {
+    const lower = query.toLowerCase();
+    return this.app.vault
+      .getAllLoadedFiles()
+      .filter((file): file is TFolder => file instanceof TFolder && !file.isRoot() && file.path.toLowerCase().includes(lower))
+      .slice(0, 50);
+  }
+
+  renderSuggestion(folder: TFolder, el: HTMLElement): void {
+    el.setText(folder.path);
+  }
+
+  selectSuggestion(folder: TFolder): void {
+    this.setValue(folder.path);
+    this.input.dispatchEvent(new Event("input"));
+    this.close();
+  }
+}
 
 export class CrispSearchSettingTab extends PluginSettingTab {
   private licenseDraft = "";
@@ -18,6 +46,7 @@ export class CrispSearchSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     this.renderLicense(containerEl);
+    this.renderSearch(containerEl);
     this.renderAbout(containerEl);
   }
 
@@ -105,6 +134,38 @@ export class CrispSearchSettingTab extends PluginSettingTab {
             }
           }),
       );
+  }
+
+  private renderSearch(containerEl: HTMLElement): void {
+    const plugin = this.plugin;
+    new Setting(containerEl).setName("搜索").setHeading();
+    new Setting(containerEl)
+      .setName("结果排序")
+      .setDesc("笔记名命中的结果始终排在正文命中之前，排序只调整各组内部的先后。面板左下角可以临时切换。")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOptions(SORT_ORDERS)
+          .setValue(plugin.settings.sortOrder)
+          .onChange((value) => {
+            if (!isSortOrder(value)) return;
+            plugin.settings.sortOrder = value;
+            void plugin.saveSettings();
+          }),
+      );
+    new Setting(containerEl)
+      .setName("新建笔记位置")
+      .setDesc("搜索词作为笔记名新建时放在哪个文件夹。留空则跟随 Obsidian「文件与链接」里的新建笔记位置。")
+      .addText((text) => {
+        new FolderSuggest(this.app, text.inputEl);
+        text
+          .setPlaceholder("跟随 Obsidian 设置")
+          .setValue(plugin.settings.newNoteFolder)
+          .onChange((value) => {
+            const trimmed = value.trim();
+            plugin.settings.newNoteFolder = trimmed ? normalizePath(trimmed) : "";
+            void plugin.saveSettings();
+          });
+      });
   }
 
   private renderAbout(containerEl: HTMLElement): void {

@@ -17,12 +17,16 @@ import { discoverVaultCrispLicenses, verifyLicenseCode } from "./license";
 import { ActivationOutcome, LicenseController, LicenseResult } from "./license-controller";
 import { LauncherModal } from "./modal";
 import { CrispSearchSettingTab } from "./settings-tab";
+import { SortOrder, isSortOrder } from "./sort";
 
 const PLUGIN_ID = "crisp-search";
 
 export interface SearchSettings {
   licenseCode: string;
   recentCommands: string[];
+  sortOrder: SortOrder;
+  // Folder for notes created from the panel; empty follows Obsidian's own new-note location.
+  newNoteFolder: string;
 }
 
 function normalizeSettings(raw: unknown): SearchSettings {
@@ -31,6 +35,8 @@ function normalizeSettings(raw: unknown): SearchSettings {
   return {
     licenseCode: typeof data.licenseCode === "string" ? data.licenseCode : "",
     recentCommands: recent.filter((id): id is string => typeof id === "string").slice(0, RECENT_COMMAND_LIMIT),
+    sortOrder: isSortOrder(data.sortOrder) ? data.sortOrder : "recent",
+    newNoteFolder: typeof data.newNoteFolder === "string" ? data.newNoteFolder : "",
   };
 }
 

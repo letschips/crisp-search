@@ -85,7 +85,12 @@ test("recent commands load from data.json and are saved most recent first", asyn
   plugin.recordCommand("c:three");
   await plugin.saving;
   // Saves run one after another, so the last write is the latest list.
-  assert.deepEqual(plugin.saved.at(-1), { licenseCode: "", recentCommands: ["c:three", "b:two", "a:one"] });
+  assert.deepEqual(plugin.saved.at(-1), {
+    licenseCode: "",
+    recentCommands: ["c:three", "b:two", "a:one"],
+    sortOrder: "recent",
+    newNoteFolder: "",
+  });
 });
 
 test("an unreadable data.json is never overwritten", async () => {

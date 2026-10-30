@@ -1,7 +1,8 @@
-import { App, Command, Hotkey, Keymap, Menu, Modal, Notice, Platform, Scope, TFile, setIcon } from "obsidian";
+import { App, Command, Hotkey, Keymap, Menu, Modal, Notice, Platform, Scope, TFile, TFolder, normalizePath, setIcon } from "obsidian";
 import { CommandIndex, CommandMatch, isCommandAvailable } from "./commands";
 import { Excerpt, MAX_HITS, SearchResult, highlightRanges, highlightSegments } from "./engine";
 import type CrispSearchPlugin from "./main";
+import { SORT_ORDERS, SortOrder, resultOrder } from "./sort";
 
 const RECENT_LIMIT = 8;
 // Commands shown among note results; the ">" prefix lists all of them.
@@ -27,7 +28,14 @@ interface CommandItem {
   match: CommandMatch;
 }
 
-type Item = FileItem | CommandItem;
+// The query as a new note's name, offered below the results.
+interface CreateItem {
+  type: "create";
+  section: "";
+  name: string;
+}
+
+type Item = FileItem | CommandItem | CreateItem;
 
 interface Action<T extends Item = Item> {
   label: string;
@@ -54,6 +62,13 @@ function hotkeyKeys(hotkey: Hotkey): string[] {
 
 const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "heic"]);
 
+// Characters a file name cannot hold, plus those that break a [[link]].
+const UNSAFE_NAME = /[\\/:*?"<>|#^[\]]/g;
+
+function noteName(query: string): string {
+  return query.replace(UNSAFE_NAME, " ").replace(/\s+/g, " ").trim().replace(/^\.+/, "").slice(0, 200).trim();
+}
+
 function iconFor(file: TFile): string {
   if (file.extension === "md") return "file-text";
   if (file.extension === "canvas") return "layout-dashboard";
@@ -74,6 +89,7 @@ function renderHighlighted(el: HTMLElement, text: string, ranges: [number, numbe
 
 function itemKey(item: Item): string {
   if (item.type === "command") return `command:${item.command.id}`;
+  if (item.type === "create") return `create:${item.name}`;
   return item.hit ? `hit:${item.file.path}:${item.hit.line}` : `file:${item.file.path}`;
 }
 
@@ -114,6 +130,10 @@ export class LauncherModal extends Modal {
   private drill: { item: FileItem; index: number; scrollTop: number } | null = null;
   private readonly fileActions: Action<FileItem>[];
   private readonly commandActions: Action<CommandItem>[];
+  private readonly createActions: Action<CreateItem>[];
+  // A sort picked in the panel lasts until it closes; the setting is the default.
+  private sortOverride: SortOrder | null = null;
+  private sortLabel: HTMLElement | null = null;
   private primaryLabel: HTMLElement | null = null;
   private commands: Map<string, Command> | null = null;
   private commandIndex: CommandIndex | null = null;
@@ -130,6 +150,11 @@ export class LauncherModal extends Modal {
     this.commandActions = [
       { label: "运行", icon: "play", keys: ["↵"], run: (item) => this.runCommand(item) },
       { label: "复制命令 ID", icon: "copy", keys: [], run: (item) => this.copyCommandId(item) },
+    ];
+    this.createActions = [
+      { label: "新建笔记", icon: "file-plus", keys: MODE_KEYS.current, run: (item) => void this.createNote(item, "current") },
+      { label: "在新标签页新建", icon: "plus-square", keys: MODE_KEYS.tab, run: (item) => void this.createNote(item, "tab") },
+      { label: "在右侧新建", icon: "columns-2", keys: MODE_KEYS.split, run: (item) => void this.createNote(item, "split") },
     ];
   }
 
@@ -160,6 +185,16 @@ export class LauncherModal extends Modal {
     this.listEl = this.modalEl.createDiv({ cls: "crisp-search-list", attr: { id: `${this.idPrefix}-list`, role: "listbox" } });
 
     if (!Platform.isMobile) {
+      const tools = this.modalEl.createDiv("crisp-search-footer is-start");
+      const gear = tools.createDiv({ cls: "crisp-search-footer-icon", attr: { "aria-label": "索引与设置", "data-tooltip-position": "top" } });
+      setIcon(gear, "settings");
+      gear.addEventListener("click", () => this.showPanelMenu(gear));
+      const sort = tools.createDiv({ cls: "crisp-search-footer-action is-sort", attr: { "aria-label": "结果排序", "data-tooltip-position": "top" } });
+      this.sortLabel = sort.createSpan();
+      setIcon(sort.createSpan("crisp-search-footer-chevron"), "chevron-down");
+      sort.addEventListener("click", () => this.showSortMenu(sort));
+      this.renderSort();
+
       const footer = this.modalEl.createDiv("crisp-search-footer");
       const open = footer.createDiv("crisp-search-footer-action");
       this.primaryLabel = open.createSpan({ text: "打开" });
@@ -336,7 +371,8 @@ export class LauncherModal extends Modal {
       this.select(Math.max(this.selected - 1, 0));
     } else if (evt.key === "Enter") {
       evt.preventDefault();
-      const item = this.items[this.selected];
+      // ⇧↵ creates the note from any row, the way Obsidian's quick switcher does.
+      const item = evt.shiftKey ? this.items.find((other) => other.type === "create") : this.items[this.selected];
       if (item) this.activate(item, this.modeFor(evt));
     }
   }
@@ -417,16 +453,31 @@ export class LauncherModal extends Modal {
     return items;
   }
 
+  private get sortOrder(): SortOrder {
+    return this.sortOverride ?? this.plugin.settings.sortOrder;
+  }
+
   private searchItems(query: string): Item[] {
-    const titles: Item[] = [];
+    const titles: FileItem[] = [];
     const bodies: Item[] = [];
-    for (const result of this.plugin.engine.search(query)) {
+    const stat = (path: string) => {
+      const file = this.app.vault.getAbstractFileByPath(path);
+      return file instanceof TFile ? file.stat : undefined;
+    };
+    for (const result of this.plugin.engine.search(query, undefined, resultOrder(this.sortOrder, stat))) {
       const file = this.app.vault.getAbstractFileByPath(result.path);
       if (!(file instanceof TFile)) continue;
       if (result.kind === "title") titles.push({ type: "file", section: "笔记", file, result });
       else bodies.push({ type: "file", section: "内容", file, result });
     }
-    return [...titles, ...this.commandItems(query, MIXED_COMMAND_LIMIT), ...bodies];
+    const items: Item[] = [...titles, ...this.commandItems(query, MIXED_COMMAND_LIMIT), ...bodies];
+    // A note already named this way is the result to open, not one to create again.
+    const name = noteName(query);
+    const lower = name.toLowerCase();
+    if (name && !titles.some((item) => item.file.basename.toLowerCase() === lower)) {
+      items.push({ type: "create", section: "", name });
+    }
+    return items;
   }
 
   // Only commands that can run right now, judged once per panel: the active note does not change while it is open.
@@ -460,25 +511,28 @@ export class LauncherModal extends Modal {
     this.rows = [];
     this.input.removeAttribute("aria-activedescendant");
     this.listEl.scrollTop = 0;
-    if (this.items.length === 0) {
+    // Nothing found still offers the query as a new note, below the message.
+    if (this.items.every((item) => item.type === "create")) {
       // An emptied hit list keeps its header, so there is still a way back.
       if (this.drill) this.renderSection(this.drill.item.file.basename);
       if (query || commandMode || this.drill) {
         const text = commandMode || this.plugin.ready ? "没有结果" : "正在建立索引…";
         this.listEl.createDiv({ cls: "crisp-search-empty", text });
       }
-      return;
+      if (this.items.length === 0) return;
     }
     let section = "";
     this.items.forEach((item, index) => {
       if (item.section !== section) {
         section = item.section;
-        this.renderSection(section);
+        if (section) this.renderSection(section);
       }
       const row =
         item.type === "command"
           ? this.renderCommandRow(item, index)
-          : item.hit
+          : item.type === "create"
+            ? this.renderCreateRow(item, index)
+            : item.hit
             ? this.renderHitRow(item, item.hit, index)
             : this.renderFileRow(item, index, query);
       this.rows.push(row);
@@ -533,6 +587,16 @@ export class LauncherModal extends Modal {
     return row;
   }
 
+  private renderCreateRow(item: CreateItem, index: number): HTMLElement {
+    const row = this.createRow(index, "file-plus");
+    const title = row.createDiv("crisp-search-item-text").createSpan("crisp-search-item-title");
+    title.appendText("新建笔记「");
+    title.createSpan({ cls: "crisp-search-item-strong", text: item.name });
+    title.appendText("」");
+    renderKeys(row.createDiv("crisp-search-item-hotkey"), [MODIFIER_KEYS.Shift, "↵"]);
+    return row;
+  }
+
   private renderHitRow(item: FileItem, hit: Excerpt, index: number): HTMLElement {
     const row = this.createRow(index, "text");
     const title = row.createDiv("crisp-search-item-text").createSpan("crisp-search-item-title crisp-search-item-hit");
@@ -555,7 +619,8 @@ export class LauncherModal extends Modal {
     row.setAttr("aria-selected", "true");
     this.input.setAttr("aria-activedescendant", row.id);
     if (scroll) row.scrollIntoView({ block: "nearest" });
-    this.primaryLabel?.setText(this.items[index].type === "command" ? "运行" : "打开");
+    const type = this.items[index].type;
+    this.primaryLabel?.setText(type === "command" ? "运行" : type === "create" ? "新建" : "打开");
   }
 
   private toggleActions(open = !this.actionsOpen): void {
@@ -573,6 +638,7 @@ export class LauncherModal extends Modal {
   private actionsFor(item: Item | undefined): Action[] {
     if (!item) return [];
     if (item.type === "command") return this.commandActions as Action[];
+    if (item.type === "create") return this.createActions as Action[];
     const more: Action<FileItem> = { label: "更多操作…", icon: "more-horizontal", keys: [], more: true, run: () => this.showMenuAtRow() };
     if (!hasMoreHits(item)) return [...this.fileActions, more] as Action[];
     const hits: Action<FileItem> = {
@@ -638,7 +704,96 @@ export class LauncherModal extends Modal {
 
   private activate(item: Item, mode: OpenMode): void {
     if (item.type === "command") this.runCommand(item);
+    else if (item.type === "create") void this.createNote(item, mode);
     else void this.openFile(item, mode);
+  }
+
+  private renderSort(): void {
+    this.sortLabel?.setText(SORT_ORDERS[this.sortOrder]);
+  }
+
+  // Applies to this panel only; the default lives in the settings.
+  private showSortMenu(anchor: HTMLElement): void {
+    const menu = new Menu();
+    for (const [order, label] of Object.entries(SORT_ORDERS) as [SortOrder, string][]) {
+      menu.addItem((menuItem) =>
+        menuItem
+          .setTitle(label)
+          .setChecked(order === this.sortOrder)
+          .onClick(() => {
+            this.sortOverride = order;
+            this.renderSort();
+            this.update();
+          }),
+      );
+    }
+    this.showMenuBelow(menu, anchor);
+  }
+
+  private showPanelMenu(anchor: HTMLElement): void {
+    const { ready, indexed, total } = this.plugin;
+    const menu = new Menu();
+    menu.addItem((menuItem) =>
+      menuItem
+        .setTitle(ready ? `已索引 ${this.plugin.engine.paths().length.toLocaleString()} 个文件` : `索引中 ${indexed}/${total}`)
+        .setIcon("database")
+        .setDisabled(true),
+    );
+    menu.addItem((menuItem) =>
+      menuItem
+        .setTitle("重建索引")
+        .setIcon("refresh-cw")
+        .onClick(() => void this.plugin.rebuildIndex()),
+    );
+    menu.addSeparator();
+    menu.addItem((menuItem) =>
+      menuItem
+        .setTitle("插件设置")
+        .setIcon("settings")
+        .onClick(() => {
+          this.close();
+          this.plugin.openSettings();
+        }),
+    );
+    this.showMenuBelow(menu, anchor);
+  }
+
+  private showMenuBelow(menu: Menu, anchor: HTMLElement): void {
+    this.toggleActions(false);
+    menu.onHide(() => this.input.focus());
+    const rect = anchor.getBoundingClientRect();
+    menu.showAtPosition({ x: rect.left, y: rect.bottom + 4 }, anchor.doc);
+  }
+
+  private async newNoteParent(): Promise<TFolder> {
+    const path = this.plugin.settings.newNoteFolder;
+    if (path) {
+      const folder = this.app.vault.getAbstractFileByPath(path);
+      if (folder instanceof TFolder) return folder;
+      if (!folder) {
+        await this.app.vault.createFolder(path);
+        const created = this.app.vault.getAbstractFileByPath(path);
+        if (created instanceof TFolder) return created;
+      }
+    }
+    return this.app.fileManager.getNewFileParent(this.app.workspace.getActiveFile()?.path ?? "");
+  }
+
+  // A note of that name already in the folder is opened instead of being created twice.
+  private async createNote(item: CreateItem, mode: OpenMode): Promise<void> {
+    this.close();
+    try {
+      const parent = await this.newNoteParent();
+      const path = normalizePath(parent.isRoot() ? `${item.name}.md` : `${parent.path}/${item.name}.md`);
+      const existing = this.app.vault.getAbstractFileByPath(path);
+      const file = existing instanceof TFile ? existing : await this.app.vault.create(path, "");
+      const workspace = this.app.workspace;
+      const leaf = mode === "split" ? workspace.getLeaf("split", "vertical") : workspace.getLeaf(mode === "tab" ? "tab" : false);
+      await leaf.openFile(file, { active: true });
+    } catch (error) {
+      console.error("Crisp Search: could not create note", error);
+      new Notice(`新建笔记失败：${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   // Checked again at run time; only a command the host accepted goes into recent use.

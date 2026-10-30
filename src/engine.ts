@@ -426,7 +426,8 @@ export class SearchEngine {
     return [...this.docs.keys()];
   }
 
-  search(query: string, limit = 60): SearchResult[] {
+  // `order` replaces the relevance order and is applied before `limit`, so the cut keeps what it puts first.
+  search(query: string, limit = 60, order?: (a: SearchResult, b: SearchResult) => number): SearchResult[] {
     const parts = queryParts(query);
     if (parts.length === 0) return [];
     const hits = this.index.search(parts.join(" "), SEARCH_OPTIONS);
@@ -456,7 +457,7 @@ export class SearchEngine {
       }
       results.push({ path: doc.path, basename: doc.basename, extension: doc.extension, kind, score, terms: hit.terms });
     }
-    results.sort((a, b) => b.score - a.score);
+    results.sort(order ?? ((a, b) => b.score - a.score));
     const top = results.slice(0, limit);
     for (const result of top) {
       const doc = this.docs.get(result.path)!;

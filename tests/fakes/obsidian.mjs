@@ -25,6 +25,9 @@ export class TFile extends TAbstractFile {
     this.basename = path.split("/").pop().replace(/\.[^.]+$/, "");
   }
 }
+export class TFolder extends TAbstractFile {}
+export class AbstractInputSuggest {}
+export const normalizePath = (path) => path;
 export class Modal {}
 export class Menu {}
 export class PluginSettingTab {

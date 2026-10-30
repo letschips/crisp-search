@@ -302,3 +302,13 @@ test("a hit-list row shows only its own line", () => {
   assert.ok(!first.text.includes("第二行"), first.text);
   assert.equal(second.line, 2);
 });
+
+test("a caller's order is applied before the limit, so the cut keeps what that order puts first", () => {
+  const docs = Array.from({ length: 70 }, (_, i) => doc(`n${String(i).padStart(2, "0")}.md`, "hello world"));
+  const engine = engineWith(...docs);
+  const byPathDesc = (a, b) => b.path.localeCompare(a.path);
+  const results = engine.search("hello", 60, byPathDesc);
+  assert.equal(results.length, 60);
+  assert.equal(results[0].path, "n69.md");
+  assert.equal(results.at(-1).path, "n10.md");
+});
