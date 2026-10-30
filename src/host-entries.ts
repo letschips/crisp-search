@@ -29,15 +29,25 @@ interface CorePlugin {
   disable(user: boolean): unknown;
 }
 
+interface HotkeysTab {
+  searchComponent?: { setValue(value: string): unknown; inputEl?: { dispatchEvent(event: Event): unknown } };
+}
+
 interface Host {
-  setting?: { settingTabs?: Tab[]; pluginTabs?: Tab[]; open?(): void; openTabById?(id: string): void } | null;
+  setting?: {
+    settingTabs?: Tab[];
+    pluginTabs?: Tab[];
+    activeTab?: HotkeysTab | null;
+    open?(): void;
+    openTabById?(id: string): void;
+  } | null;
   plugins?: {
     manifests?: Record<string, { id: string; name: string; description?: string }> | null;
     enabledPlugins?: Set<string>;
     enablePluginAndSave?(id: string): Promise<boolean>;
     disablePluginAndSave?(id: string): Promise<boolean>;
   } | null;
-  internalPlugins?: { plugins?: Record<string, CorePlugin> } | null;
+  internalPlugins?: { plugins?: Record<string, CorePlugin & { instance?: { options?: { pinned?: unknown } } }> } | null;
 }
 
 function tabs(list: unknown): Tab[] {
@@ -121,4 +131,29 @@ export async function setPluginEnabled(app: unknown, plugin: Pick<PluginEntry, "
   } catch {
     return false;
   }
+}
+
+// Commands pinned in Obsidian's command palette, in their pinned order.
+export function pinnedCommandIds(app: unknown): string[] {
+  try {
+    const palette = (app as Host).internalPlugins?.plugins?.["command-palette"];
+    const pinned = palette?.enabled ? palette.instance?.options?.pinned : undefined;
+    return Array.isArray(pinned) ? pinned.filter((id): id is string => typeof id === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+// Opens Settings → Hotkeys with its search box set to the command, so the hotkey can be set right there.
+export function openHotkeysFor(app: unknown, text: string): boolean {
+  if (!openSettingPage(app, "hotkeys")) return false;
+  try {
+    const search = (app as Host).setting?.activeTab?.searchComponent;
+    search?.setValue(text);
+    // The page filters on the field's input event, not on setValue.
+    search?.inputEl?.dispatchEvent(new Event("input"));
+  } catch {
+    // The page is open, unfiltered.
+  }
+  return true;
 }

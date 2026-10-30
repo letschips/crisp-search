@@ -18,7 +18,7 @@ await esbuild.build({
   outfile: path.join(outDir, "host-entries.mjs"),
   logLevel: "error",
 });
-const { listPlugins, listSettingPages, openSettingPage, setPluginEnabled } = await import(
+const { listPlugins, listSettingPages, openSettingPage, setPluginEnabled, pinnedCommandIds, openHotkeysFor } = await import(
   pathToFileURL(path.join(outDir, "host-entries.mjs")).href
 );
 
@@ -81,4 +81,24 @@ test("a host without these objects yields nothing and reports failure instead of
     assert.equal(openSettingPage(app, "editor"), false);
     assert.equal(await setPluginEnabled(app, { id: "x", core: false, enabled: false }, true), false);
   }
+});
+
+test("pinned commands come from Obsidian's command palette, only while it is on", () => {
+  const palette = (enabled, options) => ({ internalPlugins: { plugins: { "command-palette": { enabled, instance: { options } } } } });
+  assert.deepEqual(pinnedCommandIds(palette(true, { pinned: ["editor:toggle-bold", 3, "app:go-back"] })), ["editor:toggle-bold", "app:go-back"]);
+  assert.deepEqual(pinnedCommandIds(palette(true, {})), []);
+  assert.deepEqual(pinnedCommandIds(palette(false, { pinned: ["a:b"] })), []);
+  assert.deepEqual(pinnedCommandIds({}), []);
+});
+
+test("the hotkeys page opens filtered to one command", () => {
+  const typed = [];
+  const tab = { searchComponent: { setValue: (v) => typed.push(["set", v]), inputEl: { dispatchEvent: (e) => typed.push(["event", e.type]) } } };
+  const app = { setting: { open() {}, openTabById(id) { this.activeTab = id === "hotkeys" ? tab : null; }, activeTab: null } };
+  assert.equal(openHotkeysFor(app, "Crisp Search: 打开搜索面板"), true);
+  assert.deepEqual(typed, [["set", "Crisp Search: 打开搜索面板"], ["event", "input"]]);
+  // Without the search box the page still opens, unfiltered.
+  const bare = { setting: { open() {}, openTabById() {}, activeTab: {} } };
+  assert.equal(openHotkeysFor(bare, "x"), true);
+  assert.equal(openHotkeysFor({}, "x"), false);
 });

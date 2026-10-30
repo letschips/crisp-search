@@ -16,7 +16,16 @@ import {
 } from "./filters";
 import type CrispSearchPlugin from "./main";
 import { PANEL_MENU_ICON } from "./icon";
-import { PluginEntry, SettingPage, listPlugins, listSettingPages, openSettingPage, setPluginEnabled } from "./host-entries";
+import {
+  PluginEntry,
+  SettingPage,
+  listPlugins,
+  listSettingPages,
+  openHotkeysFor,
+  openSettingPage,
+  pinnedCommandIds,
+  setPluginEnabled,
+} from "./host-entries";
 import { newNoteName } from "./note-name";
 import { SORT_ORDERS, SortOrder, resultOrder } from "./sort";
 
@@ -241,6 +250,7 @@ export class LauncherModal extends Modal {
     ];
     this.commandActions = [
       { label: "运行", icon: "play", keys: ["↵"], run: (item) => this.runCommand(item) },
+      { label: "设置快捷键", icon: "keyboard", keys: [], run: (item) => this.setHotkey(item) },
       { label: "复制命令 ID", icon: "copy", keys: [], run: (item) => this.copyCommandId(item) },
     ];
     this.createActions = [
@@ -713,8 +723,15 @@ export class LauncherModal extends Modal {
     this.commandIndex ??= new CommandIndex([...commands.values()].map(({ id, name }) => ({ id, name })));
     const recent = this.plugin.recentCommands;
     const items: Item[] = [];
+    // An empty list starts with the commands pinned in Obsidian's command palette, then recent ones.
+    const pinned = query ? [] : pinnedCommandIds(this.app).filter((id) => commands.has(id));
+    for (const id of pinned) {
+      const command = commands.get(id)!;
+      items.push({ type: "command", section: "置顶", command, match: { id, name: command.name, score: 0, ranges: [] } });
+    }
     for (const match of this.commandIndex.search(query, recent)) {
       if (items.length >= limit) break;
+      if (pinned.includes(match.id)) continue;
       const section = !query && recent.includes(match.id) ? "最近使用" : "命令";
       items.push({ type: "command", section, command: commands.get(match.id)!, match });
     }
@@ -1110,6 +1127,11 @@ export class LauncherModal extends Modal {
       return;
     }
     this.plugin.recordCommand(item.command.id);
+  }
+
+  private setHotkey(item: CommandItem): void {
+    this.close();
+    if (!openHotkeysFor(this.app, item.command.name)) new Notice("无法打开快捷键设置");
   }
 
   private copyCommandId(item: CommandItem): void {
