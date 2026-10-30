@@ -20,7 +20,7 @@ export function isNote(extension: string): boolean {
 
 export function scopeAccepts(scope: Scope, kind: MatchKind, extension: string): boolean {
   if (scope === "notes") return kind === "title" && isNote(extension);
-  if (scope === "content") return kind !== "title";
+  if (scope === "content") return kind === "heading" || kind === "content";
   if (scope === "attachments") return !isNote(extension);
   return true;
 }

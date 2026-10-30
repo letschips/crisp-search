@@ -58,7 +58,9 @@ export interface SearchDoc {
   aliases: string[];
 }
 
-export type MatchKind = "title" | "heading" | "content";
+// "folder": only the folder path answers the query; such matches come after body matches, or one folder name
+// would fill the list with every note under it.
+export type MatchKind = "title" | "heading" | "content" | "folder";
 
 export interface PageOptions {
   limit?: number;
@@ -338,6 +340,9 @@ function excerptForMatch(frontmatter: string, body: string, parts: string[], mat
 
 export const MAX_HITS = 50;
 
+const COMPACT_MIN_DIRT = 1000;
+const COMPACT_MIN_FACTOR = 0.1;
+
 // One excerpt per matching line, for the in-note hit list.
 export function makeExcerpts(content: string, query: string, matchedTerms: string[] = [], limit = MAX_HITS): Excerpt[] {
   const parts = queryParts(query);
@@ -369,22 +374,37 @@ const SEARCH_OPTIONS: SearchOptions = {
 
 export class SearchEngine {
   private readonly docs = new Map<string, SearchDoc>();
-  private readonly titleKeys = new Map<string, { text: string; pinyin: string[] }>();
+  private readonly titleKeys = new Map<string, { text: string; name: string; pinyin: string[] }>();
   private readonly index = new MiniSearch<IndexedDoc>({
     idField: "path",
     fields: Object.keys(BOOST),
     tokenize: (text, field) => (field === "pinyin" ? text.split(" ").filter(Boolean) : tokenizeText(text)),
     processTerm: (term) => term,
+    // MiniSearch's vacuum walks the index across timers and breaks when a write lands in between; compact()
+    // runs it instead and holds writes back meanwhile.
+    autoVacuum: false,
   });
 
   // Bumped by every write, so a caller can tell whether results it holds may have changed.
   version = 0;
 
+  // Writes made while a vacuum runs, applied when it ends: a document, or null for a removal.
+  private readonly held = new Map<string, SearchDoc | null>();
+  private vacuuming: Promise<void> | null = null;
+
   get size(): number {
-    return this.docs.size;
+    return this.paths().length;
   }
 
   upsert(doc: SearchDoc): void {
+    if (this.vacuuming) {
+      this.held.set(doc.path, doc);
+      return;
+    }
+    this.write(doc);
+  }
+
+  private write(doc: SearchDoc): void {
     this.version++;
     if (this.docs.has(doc.path)) this.index.discard(doc.path);
     this.docs.set(doc.path, doc);
@@ -393,7 +413,8 @@ export class SearchEngine {
     const pinyin = [...pinyinKeys(doc.basename), ...doc.aliases.flatMap(pinyinKeys)];
     // The full file name counts as a name too, so "photo.png" finds the image it names.
     const filename = `${doc.basename}.${doc.extension}`;
-    this.titleKeys.set(doc.path, { text: [doc.basename, filename, ...doc.aliases, folder].join("\n").toLowerCase(), pinyin });
+    const name = [doc.basename, filename, ...doc.aliases].join("\n").toLowerCase();
+    this.titleKeys.set(doc.path, { text: `${name}\n${folder.toLowerCase()}`, name, pinyin });
     const { frontmatter, body } = splitFrontmatter(doc.content);
     this.index.add({
       path: doc.path,
@@ -409,15 +430,48 @@ export class SearchEngine {
     });
   }
 
+  // Drops what replaced and removed documents left in the index, once enough has piled up. The vacuum runs
+  // in batches so typing never stalls; writes made meanwhile are held and applied when it ends.
+  compact(): void {
+    if (this.vacuuming || this.index.dirtCount < COMPACT_MIN_DIRT || this.index.dirtFactor < COMPACT_MIN_FACTOR) return;
+    this.vacuuming = this.index
+      .vacuum()
+      .catch((error) => console.warn("Crisp Search: index clean-up failed", error))
+      .finally(() => {
+        this.vacuuming = null;
+        const held = [...this.held];
+        this.held.clear();
+        for (const [path, doc] of held) {
+          if (doc) this.write(doc);
+          else this.erase(path);
+        }
+      });
+  }
+
+  // Settles when no clean-up is running and held writes have been applied.
+  async idle(): Promise<void> {
+    while (this.vacuuming) await this.vacuuming;
+  }
+
   remove(path: string): void {
+    if (this.vacuuming) {
+      if (this.has(path)) this.held.set(path, null);
+      return;
+    }
+    this.erase(path);
+  }
+
+  private erase(path: string): void {
     if (!this.docs.delete(path)) return;
     this.version++;
     this.titleKeys.delete(path);
     this.index.discard(path);
   }
 
+  // Held writes count: the file is (or is no longer) indexed as far as callers are concerned.
   has(path: string): boolean {
-    return this.docs.has(path);
+    const held = this.held.get(path);
+    return held === undefined ? this.docs.has(path) : held !== null;
   }
 
   // Matches this note against the query as it is now, so the list never mixes old terms with new text.
@@ -435,6 +489,13 @@ export class SearchEngine {
     return !!keys && (keys.text.includes(lower) || keys.pinyin.some((key) => key.startsWith(lower)));
   }
 
+  // Answered by the name, file name or aliases, leaving the folder out.
+  private inName(path: string, part: string): boolean {
+    const keys = this.titleKeys.get(path);
+    const lower = part.toLowerCase();
+    return !!keys && (keys.name.includes(lower) || keys.pinyin.some((key) => key.startsWith(lower)));
+  }
+
   // The words the body has to answer: those the name, aliases or folder already answer are dropped,
   // unless that leaves nothing.
   private bodyQuery(path: string, parts: string[]): string {
@@ -443,7 +504,13 @@ export class SearchEngine {
   }
 
   paths(): string[] {
-    return [...this.docs.keys()];
+    if (!this.held.size) return [...this.docs.keys()];
+    const paths = new Set(this.docs.keys());
+    for (const [path, doc] of this.held) {
+      if (doc) paths.add(path);
+      else paths.delete(path);
+    }
+    return [...paths];
   }
 
   search(
@@ -479,12 +546,17 @@ export class SearchEngine {
       // A title hit needs every query word answered by the name, aliases or folder; otherwise the body
       // carries part of the match and the result must show where.
       const inTitle = (part: string) => this.inTitle(doc.path, part);
-      const kind: MatchKind =
-        [...fields].every((f) => TITLE_FIELDS.has(f)) || lowerParts.every(inTitle)
+      const inName = (part: string) => this.inName(doc.path, part);
+      const body: MatchKind = fields.has("headings") ? "heading" : "content";
+      // The name must answer at least one word; a match the folder alone answers shows the body if that also
+      // matched, and otherwise counts as a folder match.
+      const kind: MatchKind = !([...fields].every((f) => TITLE_FIELDS.has(f)) || lowerParts.every(inTitle))
+        ? body
+        : lowerParts.some(inName)
           ? "title"
-          : fields.has("headings")
-            ? "heading"
-            : "content";
+          : fields.has("content") || fields.has("headings") || fields.has("properties")
+            ? body
+            : "folder";
       // Bigram AND also matches scattered characters; a literal phrase is what the user meant.
       const title = doc.basename.toLowerCase();
       const phrase = lowerParts.join(" ");
@@ -496,11 +568,12 @@ export class SearchEngine {
       if (!accept || accept(result)) results.push(result);
     }
     const within = order ?? ((a: SearchResult, b: SearchResult) => b.score - a.score);
-    const group = (r: SearchResult) => (r.kind === "title" ? 0 : 1);
+    const group = (r: SearchResult) => (r.kind === "title" ? 0 : r.kind === "folder" ? 2 : 1);
     results.sort((a, b) => group(a) - group(b) || within(a, b));
     const top = results.slice(0, limit);
     for (const result of top) {
       const doc = this.docs.get(result.path)!;
+      if (result.kind === "folder") continue;
       if (result.kind === "title") {
         // Found through an alias: show it, or the row is a file name with no visible reason to be here.
         const terms = result.terms ?? [];

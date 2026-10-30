@@ -73,3 +73,10 @@ test("value suggestions: matching anywhere, prefix matches and frequent values f
   assert.deepEqual(suggestValues("", counts, 2), ["工作", "阅读"]);
   assert.equal(filterLabel({ kind: "path", value: "raw" }), "文件夹 raw");
 });
+
+test("folder-only matches belong to neither the notes nor the content tab", () => {
+  assert.equal(scopeAccepts("notes", "folder", "md"), false);
+  assert.equal(scopeAccepts("content", "folder", "md"), false);
+  assert.equal(scopeAccepts("all", "folder", "md"), true);
+  assert.equal(scopeAccepts("attachments", "folder", "png"), true);
+});

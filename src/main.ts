@@ -85,6 +85,10 @@ export default class CrispSearchPlugin extends Plugin {
   indexed = 0;
   total = 0;
   ready = false;
+  // Names, aliases, headings and tags of every file are in; bodies may still be on their way.
+  namesReady = false;
+  // Settles when the current pass has every name in, for callers that need to wait for it.
+  namesIndexed: Promise<void> = Promise.resolve();
   // Files that are not in the index because their last read failed; cleared as soon as one indexes.
   private readonly failures = new Set<string>();
   private changeQueued = false;
@@ -244,6 +248,7 @@ export default class CrispSearchPlugin extends Plugin {
     this.indexStarted = false;
     this.generation++;
     this.ready = false;
+    this.namesReady = false;
     this.indexed = 0;
     this.total = 0;
     for (const path of this.engine.paths()) this.engine.remove(path);
@@ -348,7 +353,10 @@ export default class CrispSearchPlugin extends Plugin {
     this.changeQueued = true;
     queueMicrotask(() => {
       this.changeQueued = false;
-      if (!this.unloaded) this.emitProgress();
+      if (this.unloaded) return;
+      // Not mid-pass: a clean-up then would hold back every body still to be read until it ends.
+      if (this.ready) this.engine.compact();
+      this.emitProgress();
     });
   }
 
@@ -408,9 +416,34 @@ export default class CrispSearchPlugin extends Plugin {
     this.ready = false;
     this.indexed = 0;
     this.total = files.length;
+    this.namesReady = false;
     this.emitProgress();
-    let sliceStart = performance.now();
+    const started = performance.now();
+    let sliceStart = started;
     const current = () => !this.unloaded && generation === this.generation;
+    // First pass: names from Obsidian's metadata cache, no file reads, so a note can be found by name within
+    // a second of startup. Files already indexed keep their full entry until their body is read again.
+    let namesDone!: () => void;
+    this.namesIndexed = new Promise((resolve) => (namesDone = resolve));
+    try {
+      for (const file of files) {
+        if (!current()) return;
+        if (!this.engine.has(file.path)) {
+          this.upsert(file, "", file.extension === "md" ? this.app.metadataCache.getFileCache(file) : null);
+        }
+        if (performance.now() - sliceStart > SLICE_MS) {
+          await sliceBreak();
+          sliceStart = performance.now();
+        }
+      }
+    } finally {
+      namesDone();
+    }
+    if (!current()) return;
+    this.namesReady = true;
+    const namesMs = performance.now() - started;
+    this.emitProgress();
+    // Second pass: bodies.
     for (const file of files) {
       if (!current()) return;
       try {
@@ -435,6 +468,9 @@ export default class CrispSearchPlugin extends Plugin {
     for (const path of this.engine.paths()) if (!kept.has(path)) this.engine.remove(path);
     for (const path of this.failures) if (!kept.has(path)) this.failures.delete(path);
     this.ready = true;
+    // The bodies pass replaced every names-only entry; clean up behind it now that the pass is over.
+    this.engine.compact();
+    console.debug(`Crisp Search: ${files.length} names in ${Math.round(namesMs)} ms, bodies in ${Math.round(performance.now() - started)} ms`);
     this.emitProgress();
   }
 

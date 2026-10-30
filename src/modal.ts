@@ -272,7 +272,16 @@ export class LauncherModal extends Modal {
     this.modalEl.empty();
 
     const bar = this.modalEl.createDiv("crisp-search-bar");
-    setIcon(bar.createSpan("crisp-search-bar-icon"), "search");
+    // Atom from loading.dev, rendered locally without a React/runtime dependency.
+    const atom = bar.createSpan({ cls: "crisp-search-bar-icon crisp-search-atom", attr: { "aria-hidden": "true" } });
+    atom.createSpan("crisp-search-atom-shell");
+    for (let index = 0; index < 3; index++) {
+      const orbit = atom.createSpan("crisp-search-atom-orbit");
+      orbit.style.setProperty("--crisp-search-atom-tilt", `${index * 60}deg`);
+      const spin = orbit.createSpan("crisp-search-atom-spin");
+      spin.style.animationDelay = `${(index - 3) / 3}s`;
+      spin.createSpan("crisp-search-atom-ring");
+    }
     this.chipsEl = bar.createDiv("crisp-search-chips");
     this.idPrefix = `crisp-search-${++instanceCount}`;
     this.input = bar.createEl("input", {
@@ -428,9 +437,10 @@ export class LauncherModal extends Modal {
   }
 
   private renderStatus(): void {
-    const { ready, indexed, total, failed } = this.plugin;
+    const { ready, namesReady, indexed, total, failed } = this.plugin;
     if (!this.plugin.licensed) this.statusEl.setText("");
-    else if (!ready) this.statusEl.setText(`索引中 ${indexed}/${total}`);
+    // Names are searchable once the first pass is done; only bodies are still coming.
+    else if (!ready) this.statusEl.setText(namesReady ? `正文索引中 ${indexed}/${total}` : "正在读取文件名…");
     else this.statusEl.setText(failed.length ? `${failed.length} 个文件未能索引` : "");
     this.statusEl.setAttr("title", ready && failed.length ? `${failed.slice(0, 20).join("\n")}\n\n运行「重建搜索索引」重试` : "");
   }
@@ -637,6 +647,7 @@ export class LauncherModal extends Modal {
   private searchItems(query: string): Item[] {
     const titles: FileItem[] = [];
     const bodies: Item[] = [];
+    const folders: Item[] = [];
     const stat = (path: string) => {
       const file = this.app.vault.getAbstractFileByPath(path);
       return file instanceof TFile ? file.stat : undefined;
@@ -662,11 +673,12 @@ export class LauncherModal extends Modal {
       const file = this.app.vault.getAbstractFileByPath(result.path);
       if (!(file instanceof TFile)) continue;
       if (result.kind === "title") titles.push({ type: "file", section: "笔记", file, result });
+      else if (result.kind === "folder") folders.push({ type: "file", section: "所在文件夹", file, result });
       else bodies.push({ type: "file", section: "内容", file, result });
     }
     const mixed = scope === "all" && query && !this.filters.length;
     const commands = mixed ? [...this.commandItems(query, MIXED_COMMAND_LIMIT), ...this.hostItems(query, MIXED_HOST_LIMIT)] : [];
-    const items: Item[] = [...titles, ...commands, ...bodies];
+    const items: Item[] = [...titles, ...commands, ...bodies, ...folders];
     if (page.total > page.results.length) {
       const shown = page.results.length;
       if (this.globalSearch()) items.push({ type: "more", section: "", shown, total: page.total });
@@ -1040,7 +1052,7 @@ export class LauncherModal extends Modal {
 
   // The sort picked here applies to this panel only; the default lives in the settings.
   private showPanelMenu(anchor: HTMLElement): void {
-    const { ready, indexed, total } = this.plugin;
+    const { ready, namesReady, indexed, total } = this.plugin;
     const menu = new Menu();
     for (const [order, label] of Object.entries(SORT_ORDERS) as [SortOrder, string][]) {
       menu.addItem((menuItem) =>
@@ -1056,7 +1068,13 @@ export class LauncherModal extends Modal {
     menu.addSeparator();
     menu.addItem((menuItem) =>
       menuItem
-        .setTitle(ready ? `已索引 ${this.plugin.engine.paths().length.toLocaleString()} 个文件` : `索引中 ${indexed}/${total}`)
+        .setTitle(
+          ready
+            ? `已索引 ${this.plugin.engine.paths().length.toLocaleString()} 个文件`
+            : namesReady
+              ? `正文索引中 ${indexed}/${total}`
+              : "正在读取文件名…",
+        )
         .setIcon("database")
         .setDisabled(true),
     );

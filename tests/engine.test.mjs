@@ -377,3 +377,47 @@ test("filters alone list every kept file in the given order, counted and cut", (
   assert.equal(page.results[0].kind, "title");
   assert.equal(engine.doc("x.png").extension, "png");
 });
+
+test("writes that arrive while the index is being compacted wait for it and then apply", async () => {
+  const engine = new SearchEngine();
+  // Enough distinct terms that the vacuum runs in several batches, with waits a write can land in.
+  for (const word of ["alpha", "bravo"]) {
+    for (let i = 0; i < 1500; i++) engine.upsert(doc(`n${i}.md`, `${word} uniq${i}x${word}`));
+  }
+  assert.equal(engine.index.isVacuuming, false);
+  engine.compact();
+  assert.equal(engine.index.isVacuuming, true);
+  // New terms mid-vacuum used to break MiniSearch's walk over the index.
+  for (let i = 0; i < 50; i++) engine.upsert(doc(`late${i}.md`, `zulu late${i}word`));
+  engine.remove("n0.md");
+  assert.equal(engine.has("late3.md"), true);
+  assert.equal(engine.has("n0.md"), false);
+  await engine.idle();
+  assert.equal(engine.index.dirtCount <= 1, true);
+  assert.equal(engine.searchPage("zulu").total, 50);
+  assert.equal(engine.searchPage("bravo").total, 1499);
+  assert.equal(engine.searchPage("alpha").total, 0);
+});
+
+test("a match that only the folder answers is its own kind, listed after body matches", () => {
+  const engine = engineWith(
+    doc("System/policies/brand.md", "nothing here"),
+    doc("System/notes.md", "nothing"),
+    doc("Topics/system-design.md", "x"),
+    doc("Topics/body.md", "the system boots"),
+  );
+  const results = engine.search("system");
+  assert.deepEqual(results.map((r) => r.kind), ["title", "content", "folder", "folder"]);
+  assert.equal(results[0].path, "Topics/system-design.md");
+  assert.equal(results[1].path, "Topics/body.md");
+});
+
+test("folder matches never push body matches out of a cut list", () => {
+  const engine = engineWith(
+    ...Array.from({ length: 80 }, (_, i) => doc(`System/n${i}.md`, "x")),
+    doc("Topics/body.md", "system notes"),
+  );
+  const { results, total } = engine.searchPage("system");
+  assert.equal(total, 81);
+  assert.equal(results[0].path, "Topics/body.md");
+});

@@ -332,3 +332,44 @@ test("B3: a change to Obsidian's excluded files re-indexes, including files no l
   await plugin.indexing;
   assert.deepEqual(plugin.engine.paths().sort(), ["b.md", "notes/a.md"]);
 });
+
+test("names are searchable before any file has been read; bodies follow", async () => {
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const { plugin } = await setup({
+    paths: ["notes/周报模板.md", "b.md"],
+    read: async (file) => {
+      await gate;
+      return `bodymarker ${file.basename}`;
+    },
+  });
+  const building = plugin.rebuildIndex();
+  await plugin.namesIndexed;
+  assert.equal(plugin.namesReady, true);
+  assert.equal(plugin.ready, false);
+  assert.deepEqual(plugin.engine.search("周报").map((r) => r.path), ["notes/周报模板.md"]);
+  assert.deepEqual(plugin.engine.search("bodymarker"), []);
+  release();
+  await building;
+  assert.equal(plugin.ready, true);
+  assert.equal(plugin.engine.search("bodymarker").length, 2);
+});
+
+test("a re-index keeps bodies searchable while the names pass runs", async () => {
+  let held = false;
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const { plugin } = await setup({
+    read: async (file) => {
+      if (held) await gate;
+      return `keptmarker ${file.basename}`;
+    },
+  });
+  await plugin.rebuildIndex();
+  held = true;
+  const building = plugin.rebuildIndex();
+  await plugin.namesIndexed;
+  assert.equal(plugin.engine.search("keptmarker").length, 3);
+  release();
+  await building;
+});

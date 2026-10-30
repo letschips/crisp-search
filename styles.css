@@ -43,13 +43,57 @@
 
 .crisp-search-bar-icon {
   display: flex;
+  flex: none;
   color: var(--text-muted);
 }
 
-.crisp-search-bar-icon svg {
+/* Adapted from loading.dev Atom (MIT); see THIRD_PARTY_NOTICES.md. */
+.crisp-search-atom {
+  position: relative;
   width: 22px;
   height: 22px;
-  stroke-width: 2;
+  pointer-events: none;
+}
+
+.crisp-search-atom-shell,
+.crisp-search-atom-ring {
+  position: absolute;
+  inset: 0;
+  box-sizing: border-box;
+  border: 1.21px solid currentColor;
+  border-radius: 50%;
+}
+
+.crisp-search-atom-orbit,
+.crisp-search-atom-spin {
+  position: absolute;
+  inset: 0;
+  transform-style: preserve-3d;
+}
+
+.crisp-search-atom-orbit {
+  transform: rotate(var(--crisp-search-atom-tilt)) rotateX(90deg);
+}
+
+.crisp-search-atom-spin {
+  transform-origin: center;
+  animation: crisp-search-atom-rotate 1s linear infinite;
+}
+
+.crisp-search-atom-ring {
+  border-width: 0.99px;
+  transform: rotateX(90deg);
+}
+
+@keyframes crisp-search-atom-rotate {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .crisp-search-atom-spin {
+    animation: none;
+    transform: rotate(60deg);
+  }
 }
 
 /* Filter chips sit before the field, in the same line. */
