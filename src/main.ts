@@ -12,7 +12,7 @@ import {
 } from "obsidian";
 import { preserveUnreadableData, verifyDataWrite } from "./data-safety";
 import { SearchDoc, SearchEngine } from "./engine";
-import { CRISP_SEARCH_ICON, CRISP_SEARCH_ICON_SVG } from "./icon";
+import { CRISP_SEARCH_ICON, CRISP_SEARCH_ICON_SVG, PANEL_MENU_ICON, PANEL_MENU_ICON_SVG } from "./icon";
 import { discoverVaultCrispLicenses, verifyLicenseCode } from "./license";
 import { ActivationOutcome, LicenseController, LicenseResult } from "./license-controller";
 import { LauncherModal } from "./modal";
@@ -136,6 +136,7 @@ export default class CrispSearchPlugin extends Plugin {
     this.registerInterval(window.setInterval(() => this.licenseController.checkExpiry(), 60_000));
 
     addIcon(CRISP_SEARCH_ICON, CRISP_SEARCH_ICON_SVG);
+    addIcon(PANEL_MENU_ICON, PANEL_MENU_ICON_SVG);
     this.settingTab = new CrispSearchSettingTab(this.app, this);
     this.addSettingTab(this.settingTab);
     this.addCommand({ id: "open", name: "打开搜索面板", callback: () => this.openLauncher() });

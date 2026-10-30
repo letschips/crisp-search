@@ -2,6 +2,7 @@ import { App, Command, Hotkey, Keymap, Menu, Modal, Notice, Platform, Scope, TFi
 import { CommandIndex, CommandMatch, isCommandAvailable } from "./commands";
 import { Excerpt, MAX_HITS, SearchResult, highlightRanges, highlightSegments } from "./engine";
 import type CrispSearchPlugin from "./main";
+import { PANEL_MENU_ICON } from "./icon";
 import { SORT_ORDERS, SortOrder, resultOrder } from "./sort";
 
 const RECENT_LIMIT = 8;
@@ -203,9 +204,9 @@ export class LauncherModal extends Modal {
 
     if (!Platform.isMobile) {
       const tools = this.modalEl.createDiv("crisp-search-footer is-start");
-      const gear = tools.createDiv({ cls: "crisp-search-footer-icon", attr: { "aria-label": "排序、索引与设置", "data-tooltip-position": "top" } });
-      setIcon(gear, "settings");
-      gear.addEventListener("click", () => this.showPanelMenu(gear));
+      const menuButton = tools.createDiv({ cls: "crisp-search-footer-icon", attr: { "aria-label": "排序、索引与设置", "data-tooltip-position": "top" } });
+      setIcon(menuButton, PANEL_MENU_ICON);
+      menuButton.addEventListener("click", () => this.showPanelMenu(menuButton));
 
       const footer = this.modalEl.createDiv("crisp-search-footer");
       const open = footer.createDiv("crisp-search-footer-action");

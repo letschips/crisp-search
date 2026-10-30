@@ -314,7 +314,7 @@ body .crisp-search-container .modal.crisp-search-panel input.crisp-search-input.
   background: var(--crisp-search-hover);
 }
 
-/* Bottom left: one gear for this panel's sort, the index and the settings. */
+/* Bottom left: one menu button for this panel's sort, the index and the settings. */
 
 .crisp-search-footer.is-start {
   right: auto;
@@ -333,8 +333,9 @@ body .crisp-search-container .modal.crisp-search-panel input.crisp-search-input.
 }
 
 .crisp-search-footer-icon svg {
-  width: 16px;
-  height: 16px;
+  width: 20px;
+  height: 20px;
+  stroke-width: 2px;
 }
 
 .crisp-search-item-strong {

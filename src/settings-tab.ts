@@ -141,7 +141,7 @@ export class CrispSearchSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("搜索").setHeading();
     new Setting(containerEl)
       .setName("结果排序")
-      .setDesc("笔记名命中的结果始终排在正文命中之前，排序只调整各组内部的先后。面板左下角的齿轮菜单里可以临时切换。")
+      .setDesc("笔记名命中的结果始终排在正文命中之前，排序只调整各组内部的先后。面板左下角的菜单按钮里可以临时切换。")
       .addDropdown((dropdown) =>
         dropdown
           .addOptions(SORT_ORDERS)
