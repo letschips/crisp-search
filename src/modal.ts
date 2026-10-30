@@ -194,6 +194,8 @@ export class LauncherModal extends Modal {
   // A sort picked in the panel lasts until it closes; the setting is the default.
   private sortOverride: SortOrder | null = null;
   private primaryLabel: HTMLElement | null = null;
+  // One "⋯" button, moved into whichever row is selected.
+  private moreButton: HTMLElement | null = null;
   private commands: Map<string, Command> | null = null;
   private commandIndex: CommandIndex | null = null;
 
@@ -810,6 +812,32 @@ export class LauncherModal extends Modal {
     const type = this.items[index].type;
     const labels: Record<Item["type"], string> = { command: "运行", create: "新建", query: "搜索", file: "打开", more: "查看", suggest: "添加" };
     this.primaryLabel?.setText(labels[type]);
+    this.placeMoreButton(row, this.items[index]);
+  }
+
+  // Rows with more than one action show "⋯" while selected; it opens the same menu as a right-click.
+  private placeMoreButton(row: HTMLElement, item: Item): void {
+    if (Platform.isMobile) return;
+    if (this.actionsFor(item).length < 2) {
+      this.moreButton?.detach();
+      return;
+    }
+    if (!this.moreButton) {
+      const button = createDiv({ cls: "crisp-search-item-more", attr: { "aria-label": "更多操作", "data-tooltip-position": "top" } });
+      setIcon(button, "more-horizontal");
+      // Keeps focus in the field, and keeps the click from also choosing the row.
+      button.addEventListener("mousedown", (evt) => evt.preventDefault());
+      button.addEventListener("click", (evt) => {
+        evt.stopPropagation();
+        const current = this.items[this.selected];
+        if (!current) return;
+        this.toggleActions(false);
+        const rect = button.getBoundingClientRect();
+        this.showItemMenu(current, (menu) => menu.showAtPosition({ x: rect.right, y: rect.bottom + 4, left: true }, button.doc));
+      });
+      this.moreButton = button;
+    }
+    row.appendChild(this.moreButton);
   }
 
   private toggleActions(open = !this.actionsOpen): void {

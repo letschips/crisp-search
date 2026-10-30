@@ -415,6 +415,29 @@ body .crisp-search-container .modal.crisp-search-panel input.crisp-search-input.
   stroke-width: 2px;
 }
 
+.crisp-search-item-more {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-right: -4px;
+  border-radius: 999px;
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.crisp-search-item-more:hover {
+  background: var(--crisp-search-line);
+  color: var(--text-normal);
+}
+
+.crisp-search-item-more svg {
+  width: 16px;
+  height: 16px;
+}
+
 .crisp-search-item-strong {
   font-weight: 600;
 }

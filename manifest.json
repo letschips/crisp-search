@@ -1,7 +1,7 @@
 {
   "id": "crisp-search",
   "name": "Crisp Search",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "minAppVersion": "1.6.0",
   "description": "A launcher-style search panel for notes, text and commands, tuned for Chinese with pinyin matching.",
   "author": "letschips",
