@@ -28,7 +28,7 @@ async function setup(options = {}) {
   const { fail = () => false, ignored = () => false } = options;
   // Passed explicitly as undefined to mean "data.json exists but could not be read".
   const data = "data" in options ? options.data : null;
-  const files = ["a.md", "bad.md", "z.md"].map((p) => new TFile(p));
+  const files = (options.paths ?? ["a.md", "bad.md", "z.md"]).map((p) => new TFile(p));
   const events = {};
   const app = {
     workspace: { layoutReady: true, onLayoutReady: (fn) => fn() },
@@ -90,6 +90,8 @@ test("recent commands load from data.json and are saved most recent first", asyn
     recentCommands: ["c:three", "b:two", "a:one"],
     sortOrder: "recent",
     newNoteFolder: "",
+    excludedFolders: [],
+    recentQueries: [],
   });
 });
 
@@ -271,3 +273,31 @@ for (const scenario of ["stop", "unload", "exclude"]) {
     assert.equal(plugin.engine.size, 0);
   });
 }
+
+test("folders excluded in the plugin stay out of the index, and changing the list re-indexes", async () => {
+  const { plugin } = await setup({
+    paths: ["notes/a.md", "private/b.md", "private/deep/c.md", "privateer/d.md"],
+    data: { excludedFolders: ["private/", 3, " ", "notes/../x"] },
+  });
+  assert.deepEqual(plugin.settings.excludedFolders, ["private", "notes/../x"]);
+  await plugin.rebuildIndex();
+  assert.deepEqual(plugin.engine.paths().sort(), ["notes/a.md", "privateer/d.md"]);
+  await plugin.setExcludedFolders(["/notes/", "notes", ""]);
+  assert.deepEqual(plugin.settings.excludedFolders, ["notes"]);
+  assert.deepEqual(plugin.engine.paths().sort(), ["private/b.md", "private/deep/c.md", "privateer/d.md"]);
+});
+
+test("recent searches are kept most recent first, once each, and capped", async () => {
+  const { plugin } = await setup({ data: { recentQueries: ["旧", 1, ""] } });
+  assert.deepEqual(plugin.recentQueries, ["旧"]);
+  for (const q of ["a", " b ", "a", ""]) plugin.recordQuery(q);
+  assert.deepEqual(plugin.recentQueries, ["a", "b", "旧"]);
+  plugin.forgetQuery("b");
+  assert.deepEqual(plugin.recentQueries, ["a", "旧"]);
+  for (let i = 0; i < 30; i++) plugin.recordQuery(`q${i}`);
+  assert.equal(plugin.recentQueries.length, 10);
+  assert.equal(plugin.recentQueries[0], "q29");
+  plugin.clearQueries();
+  await plugin.saving;
+  assert.deepEqual(plugin.saved.at(-1).recentQueries, []);
+});

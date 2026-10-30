@@ -141,7 +141,7 @@ export class CrispSearchSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("搜索").setHeading();
     new Setting(containerEl)
       .setName("结果排序")
-      .setDesc("笔记名命中的结果始终排在正文命中之前，排序只调整各组内部的先后。面板左下角可以临时切换。")
+      .setDesc("笔记名命中的结果始终排在正文命中之前，排序只调整各组内部的先后。面板左下角的齿轮菜单里可以临时切换。")
       .addDropdown((dropdown) =>
         dropdown
           .addOptions(SORT_ORDERS)
@@ -166,6 +166,30 @@ export class CrispSearchSettingTab extends PluginSettingTab {
             void plugin.saveSettings();
           });
       });
+    new Setting(containerEl)
+      .setName("排除的文件夹")
+      .setDesc("每行一个文件夹，其中的文件不进入搜索。Obsidian「文件与链接」里排除的文件本来就不会被搜到。离开输入框后重建索引。")
+      .addTextArea((text) => {
+        text.inputEl.rows = 4;
+        text.setPlaceholder("Sidecar\nraw/inbox").setValue(plugin.settings.excludedFolders.join("\n"));
+        text.inputEl.addEventListener("blur", () => {
+          const folders = text.getValue().split("\n");
+          const before = plugin.settings.excludedFolders.join("\n");
+          void plugin.setExcludedFolders(folders).then(() => {
+            if (plugin.settings.excludedFolders.join("\n") !== before) new Notice("排除列表已更新，索引已重建");
+          });
+          text.setValue(plugin.settings.excludedFolders.join("\n"));
+        });
+      });
+    new Setting(containerEl)
+      .setName("最近搜索")
+      .setDesc("打开过结果的搜索词会出现在空白面板里，最多记 10 条。")
+      .addButton((button) =>
+        button.setButtonText("清除").onClick(() => {
+          plugin.clearQueries();
+          new Notice("已清除最近搜索");
+        }),
+      );
   }
 
   private renderAbout(containerEl: HTMLElement): void {

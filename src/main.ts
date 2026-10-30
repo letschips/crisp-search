@@ -27,20 +27,35 @@ export interface SearchSettings {
   sortOrder: SortOrder;
   // Folder for notes created from the panel; empty follows Obsidian's own new-note location.
   newNoteFolder: string;
+  // Kept out of the index on top of Obsidian's own excluded files.
+  excludedFolders: string[];
+  recentQueries: string[];
+}
+
+function strings(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+// Trimmed, without surrounding slashes, each once; "" would exclude the whole vault.
+function folderList(folders: string[]): string[] {
+  const clean = folders.map((folder) => folder.trim().replace(/^\/+|\/+$/g, "")).filter(Boolean);
+  return [...new Set(clean)];
 }
 
 function normalizeSettings(raw: unknown): SearchSettings {
   const data = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
-  const recent = Array.isArray(data.recentCommands) ? data.recentCommands : [];
   return {
     licenseCode: typeof data.licenseCode === "string" ? data.licenseCode : "",
-    recentCommands: recent.filter((id): id is string => typeof id === "string").slice(0, RECENT_COMMAND_LIMIT),
+    recentCommands: strings(data.recentCommands).slice(0, RECENT_COMMAND_LIMIT),
     sortOrder: isSortOrder(data.sortOrder) ? data.sortOrder : "recent",
     newNoteFolder: typeof data.newNoteFolder === "string" ? data.newNoteFolder : "",
+    excludedFolders: folderList(strings(data.excludedFolders)),
+    recentQueries: strings(data.recentQueries).filter(Boolean).slice(0, RECENT_QUERY_LIMIT),
   };
 }
 
 const RECENT_COMMAND_LIMIT = 20;
+const RECENT_QUERY_LIMIT = 10;
 
 // Obsidian has no public API to list, look up hotkeys for or run commands; every launcher uses these.
 interface CommandHost {
@@ -273,6 +288,39 @@ export default class CrispSearchPlugin extends Plugin {
     void this.saveSettings();
   }
 
+  get recentQueries(): string[] {
+    return this.settings.recentQueries;
+  }
+
+  recordQuery(query: string): void {
+    const text = query.trim();
+    if (!text) return;
+    this.settings.recentQueries = [text, ...this.settings.recentQueries.filter((other) => other !== text)].slice(
+      0,
+      RECENT_QUERY_LIMIT,
+    );
+    void this.saveSettings();
+  }
+
+  forgetQuery(query: string): void {
+    this.settings.recentQueries = this.settings.recentQueries.filter((other) => other !== query);
+    void this.saveSettings();
+  }
+
+  clearQueries(): void {
+    this.settings.recentQueries = [];
+    void this.saveSettings();
+  }
+
+  // A running index is rebuilt so the new list applies at once; its last step drops what is now excluded.
+  async setExcludedFolders(folders: string[]): Promise<void> {
+    const next = folderList(folders);
+    if (next.join("\n") === this.settings.excludedFolders.join("\n")) return;
+    this.settings.excludedFolders = next;
+    void this.saveSettings();
+    if (this.indexStarted) await this.rebuildIndex();
+  }
+
   onProgress(listener: () => void): () => void {
     this.progressListeners.add(listener);
     return () => this.progressListeners.delete(listener);
@@ -297,6 +345,7 @@ export default class CrispSearchPlugin extends Plugin {
   }
 
   isIgnored(path: string): boolean {
+    if (this.settings.excludedFolders.some((folder) => path.startsWith(`${folder}/`))) return true;
     const cache = this.app.metadataCache as unknown as { isUserIgnored?: (path: string) => boolean };
     return cache.isUserIgnored?.(path) ?? false;
   }

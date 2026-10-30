@@ -35,7 +35,17 @@ interface CreateItem {
   name: string;
 }
 
-type Item = FileItem | CommandItem | CreateItem;
+// A search typed before; choosing it puts it back in the field.
+interface QueryItem {
+  type: "query";
+  section: string;
+  query: string;
+}
+
+type Item = FileItem | CommandItem | CreateItem | QueryItem;
+
+// Recent searches shown under the recent notes in an empty panel.
+const RECENT_QUERY_SHOWN = 3;
 
 interface Action<T extends Item = Item> {
   label: string;
@@ -53,6 +63,7 @@ const MODIFIER_KEYS: Record<string, string> = Platform.isMacOS
   : { Mod: "Ctrl", Ctrl: "Ctrl", Meta: "Win", Alt: "Alt", Shift: "Shift" };
 // One table for what the menu shows and what Enter does, so the two cannot drift apart.
 const MODE_KEYS: Record<OpenMode, string[]> = { current: ["↵"], tab: [MOD, "↵"], split: [MOD, ALT, "↵"] };
+const INSERT_KEYS = [ALT, "↵"];
 const KEY_NAMES: Record<string, string> = { ArrowUp: "↑", ArrowDown: "↓", ArrowLeft: "←", ArrowRight: "→", Enter: "↵", " ": "Space" };
 
 function hotkeyKeys(hotkey: Hotkey): string[] {
@@ -90,6 +101,7 @@ function renderHighlighted(el: HTMLElement, text: string, ranges: [number, numbe
 function itemKey(item: Item): string {
   if (item.type === "command") return `command:${item.command.id}`;
   if (item.type === "create") return `create:${item.name}`;
+  if (item.type === "query") return `query:${item.query}`;
   return item.hit ? `hit:${item.file.path}:${item.hit.line}` : `file:${item.file.path}`;
 }
 
@@ -131,9 +143,9 @@ export class LauncherModal extends Modal {
   private readonly fileActions: Action<FileItem>[];
   private readonly commandActions: Action<CommandItem>[];
   private readonly createActions: Action<CreateItem>[];
+  private readonly queryActions: Action<QueryItem>[];
   // A sort picked in the panel lasts until it closes; the setting is the default.
   private sortOverride: SortOrder | null = null;
-  private sortLabel: HTMLElement | null = null;
   private primaryLabel: HTMLElement | null = null;
   private commands: Map<string, Command> | null = null;
   private commandIndex: CommandIndex | null = null;
@@ -145,6 +157,7 @@ export class LauncherModal extends Modal {
       { label: "打开", icon: "file-input", keys: MODE_KEYS.current, run: (item) => void this.openFile(item, "current") },
       { label: "在新标签页打开", icon: "plus-square", keys: MODE_KEYS.tab, run: (item) => void this.openFile(item, "tab") },
       { label: "在右侧打开", icon: "columns-2", keys: MODE_KEYS.split, run: (item) => void this.openFile(item, "split") },
+      { label: "插入链接", icon: "link-2", keys: INSERT_KEYS, run: (item) => this.insertLink(item) },
       { label: "复制链接", icon: "link", keys: [], run: (item) => this.copyLink(item) },
     ];
     this.commandActions = [
@@ -155,6 +168,10 @@ export class LauncherModal extends Modal {
       { label: "新建笔记", icon: "file-plus", keys: MODE_KEYS.current, run: (item) => void this.createNote(item, "current") },
       { label: "在新标签页新建", icon: "plus-square", keys: MODE_KEYS.tab, run: (item) => void this.createNote(item, "tab") },
       { label: "在右侧新建", icon: "columns-2", keys: MODE_KEYS.split, run: (item) => void this.createNote(item, "split") },
+    ];
+    this.queryActions = [
+      { label: "搜索", icon: "search", keys: ["↵"], run: (item) => this.searchAgain(item) },
+      { label: "从最近搜索中移除", icon: "x", keys: [], run: (item) => this.forgetQuery(item) },
     ];
   }
 
@@ -186,14 +203,9 @@ export class LauncherModal extends Modal {
 
     if (!Platform.isMobile) {
       const tools = this.modalEl.createDiv("crisp-search-footer is-start");
-      const gear = tools.createDiv({ cls: "crisp-search-footer-icon", attr: { "aria-label": "索引与设置", "data-tooltip-position": "top" } });
+      const gear = tools.createDiv({ cls: "crisp-search-footer-icon", attr: { "aria-label": "排序、索引与设置", "data-tooltip-position": "top" } });
       setIcon(gear, "settings");
       gear.addEventListener("click", () => this.showPanelMenu(gear));
-      const sort = tools.createDiv({ cls: "crisp-search-footer-action is-sort", attr: { "aria-label": "结果排序", "data-tooltip-position": "top" } });
-      this.sortLabel = sort.createSpan();
-      setIcon(sort.createSpan("crisp-search-footer-chevron"), "chevron-down");
-      sort.addEventListener("click", () => this.showSortMenu(sort));
-      this.renderSort();
 
       const footer = this.modalEl.createDiv("crisp-search-footer");
       const open = footer.createDiv("crisp-search-footer-action");
@@ -252,7 +264,7 @@ export class LauncherModal extends Modal {
         return;
       }
       this.select(index, false);
-      this.activate(this.items[index], this.modeFor(evt));
+      this.choose(this.items[index], evt);
     });
 
     // The modal's own scope closes on Escape before the field sees the key, so a child scope on top
@@ -344,9 +356,8 @@ export class LauncherModal extends Modal {
       } else if (evt.key === "Enter") {
         evt.preventDefault();
         // A modified Enter means the action it is shown next to, whichever row is highlighted.
-        const mode = this.modeFor(evt);
         const item = this.items[this.selected];
-        if (mode !== "current" && item) this.activate(item, mode);
+        if (item && (this.modeFor(evt) !== "current" || this.wantsInsert(evt, item))) this.choose(item, evt);
         else this.runAction(this.actionIndex);
       }
       return;
@@ -373,8 +384,18 @@ export class LauncherModal extends Modal {
       evt.preventDefault();
       // ⇧↵ creates the note from any row, the way Obsidian's quick switcher does.
       const item = evt.shiftKey ? this.items.find((other) => other.type === "create") : this.items[this.selected];
-      if (item) this.activate(item, this.modeFor(evt));
+      if (item) this.choose(item, evt);
     }
+  }
+
+  // ⌥↵ / ⌥-click on a note inserts a link to it; everything else follows the open mode.
+  private wantsInsert(evt: MouseEvent | KeyboardEvent, item: Item): item is FileItem {
+    return evt.altKey && !Keymap.isModEvent(evt) && item.type === "file";
+  }
+
+  private choose(item: Item, evt: MouseEvent | KeyboardEvent): void {
+    if (this.wantsInsert(evt, item)) this.insertLink(item);
+    else this.activate(item, this.modeFor(evt));
   }
 
   private rowIndexOf(target: EventTarget | null): number {
@@ -449,6 +470,9 @@ export class LauncherModal extends Modal {
       const file = this.app.vault.getAbstractFileByPath(path);
       if (file instanceof TFile && !this.plugin.isIgnored(file.path)) items.push({ type: "file", section: "最近", file });
       if (items.length >= RECENT_LIMIT) break;
+    }
+    for (const query of this.plugin.recentQueries.slice(0, RECENT_QUERY_SHOWN)) {
+      items.push({ type: "query", section: "最近搜索", query });
     }
     return items;
   }
@@ -532,6 +556,8 @@ export class LauncherModal extends Modal {
           ? this.renderCommandRow(item, index)
           : item.type === "create"
             ? this.renderCreateRow(item, index)
+            : item.type === "query"
+              ? this.renderQueryRow(item, index)
             : item.hit
             ? this.renderHitRow(item, item.hit, index)
             : this.renderFileRow(item, index, query);
@@ -587,6 +613,12 @@ export class LauncherModal extends Modal {
     return row;
   }
 
+  private renderQueryRow(item: QueryItem, index: number): HTMLElement {
+    const row = this.createRow(index, "history");
+    row.createDiv("crisp-search-item-text").createSpan({ cls: "crisp-search-item-title", text: item.query });
+    return row;
+  }
+
   private renderCreateRow(item: CreateItem, index: number): HTMLElement {
     const row = this.createRow(index, "file-plus");
     const title = row.createDiv("crisp-search-item-text").createSpan("crisp-search-item-title");
@@ -620,7 +652,8 @@ export class LauncherModal extends Modal {
     this.input.setAttr("aria-activedescendant", row.id);
     if (scroll) row.scrollIntoView({ block: "nearest" });
     const type = this.items[index].type;
-    this.primaryLabel?.setText(type === "command" ? "运行" : type === "create" ? "新建" : "打开");
+    const labels: Record<Item["type"], string> = { command: "运行", create: "新建", query: "搜索", file: "打开" };
+    this.primaryLabel?.setText(labels[type]);
   }
 
   private toggleActions(open = !this.actionsOpen): void {
@@ -639,15 +672,20 @@ export class LauncherModal extends Modal {
     if (!item) return [];
     if (item.type === "command") return this.commandActions as Action[];
     if (item.type === "create") return this.createActions as Action[];
+    if (item.type === "query") return this.queryActions as Action[];
+    // Inserting needs a note open in an editor behind the panel.
+    const fileActions = this.app.workspace.activeEditor?.editor
+      ? this.fileActions
+      : this.fileActions.filter((action) => action.keys !== INSERT_KEYS);
     const more: Action<FileItem> = { label: "更多操作…", icon: "more-horizontal", keys: [], more: true, run: () => this.showMenuAtRow() };
-    if (!hasMoreHits(item)) return [...this.fileActions, more] as Action[];
+    if (!hasMoreHits(item)) return [...fileActions, more] as Action[];
     const hits: Action<FileItem> = {
       label: item.result!.hitCount! > MAX_HITS ? `查看前 ${MAX_HITS} 行命中` : `查看全部 ${item.result!.hitCount} 行命中`,
       icon: "list",
       keys: ["→"],
       run: () => this.enterHits(),
     };
-    return [...this.fileActions, hits, more] as Action[];
+    return [...fileActions, hits, more] as Action[];
   }
 
   // Right-click menu: this panel's own actions first, then the note menu Obsidian and other plugins build
@@ -705,15 +743,13 @@ export class LauncherModal extends Modal {
   private activate(item: Item, mode: OpenMode): void {
     if (item.type === "command") this.runCommand(item);
     else if (item.type === "create") void this.createNote(item, mode);
+    else if (item.type === "query") this.searchAgain(item);
     else void this.openFile(item, mode);
   }
 
-  private renderSort(): void {
-    this.sortLabel?.setText(SORT_ORDERS[this.sortOrder]);
-  }
-
-  // Applies to this panel only; the default lives in the settings.
-  private showSortMenu(anchor: HTMLElement): void {
+  // The sort picked here applies to this panel only; the default lives in the settings.
+  private showPanelMenu(anchor: HTMLElement): void {
+    const { ready, indexed, total } = this.plugin;
     const menu = new Menu();
     for (const [order, label] of Object.entries(SORT_ORDERS) as [SortOrder, string][]) {
       menu.addItem((menuItem) =>
@@ -722,17 +758,11 @@ export class LauncherModal extends Modal {
           .setChecked(order === this.sortOrder)
           .onClick(() => {
             this.sortOverride = order;
-            this.renderSort();
             this.update();
           }),
       );
     }
-    this.showMenuBelow(menu, anchor);
-  }
-
-  private showPanelMenu(anchor: HTMLElement): void {
-    const { ready, indexed, total } = this.plugin;
-    const menu = new Menu();
+    menu.addSeparator();
     menu.addItem((menuItem) =>
       menuItem
         .setTitle(ready ? `已索引 ${this.plugin.engine.paths().length.toLocaleString()} 个文件` : `索引中 ${indexed}/${total}`)
@@ -781,6 +811,7 @@ export class LauncherModal extends Modal {
 
   // A note of that name already in the folder is opened instead of being created twice.
   private async createNote(item: CreateItem, mode: OpenMode): Promise<void> {
+    this.rememberQuery();
     this.close();
     try {
       const parent = await this.newNoteParent();
@@ -816,11 +847,47 @@ export class LauncherModal extends Modal {
   }
 
   private async openFile(item: FileItem, mode: OpenMode): Promise<void> {
+    this.rememberQuery();
     this.close();
     const workspace = this.app.workspace;
     const leaf = mode === "split" ? workspace.getLeaf("split", "vertical") : workspace.getLeaf(mode === "tab" ? "tab" : false);
     const line = item.hit?.line ?? item.result?.line;
     await leaf.openFile(item.file, { active: true, eState: line !== undefined ? { line } : undefined });
+  }
+
+  // Only a search that led somewhere is remembered; command searches are not.
+  private rememberQuery(): void {
+    const raw = this.input.value.trim();
+    if (raw && !COMMAND_PREFIX.test(raw)) this.plugin.recordQuery(raw);
+  }
+
+  private searchAgain(item: QueryItem): void {
+    this.input.value = item.query;
+    this.drill = null;
+    this.update();
+    this.input.focus();
+    this.input.setSelectionRange(item.query.length, item.query.length);
+  }
+
+  private forgetQuery(item: QueryItem): void {
+    this.plugin.forgetQuery(item.query);
+    this.update();
+  }
+
+  // Into the note that was being edited when the panel opened; selected text becomes the link's display text.
+  private insertLink(item: FileItem): void {
+    const context = this.app.workspace.activeEditor;
+    const editor = context?.editor;
+    this.rememberQuery();
+    this.close();
+    if (!editor) {
+      new Notice("没有正在编辑的笔记，无法插入链接");
+      return;
+    }
+    const selection = editor.getSelection();
+    const link = this.app.fileManager.generateMarkdownLink(item.file, context.file?.path ?? "", "", selection || undefined);
+    editor.replaceSelection(link);
+    editor.focus();
   }
 
   private copyLink(item: FileItem): void {
