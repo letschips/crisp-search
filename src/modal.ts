@@ -16,6 +16,7 @@ import {
 } from "./filters";
 import type CrispSearchPlugin from "./main";
 import { PANEL_MENU_ICON } from "./icon";
+import { PluginEntry, SettingPage, listPlugins, listSettingPages, openSettingPage, setPluginEnabled } from "./host-entries";
 import { newNoteName } from "./note-name";
 import { SORT_ORDERS, SortOrder, resultOrder } from "./sort";
 
@@ -74,9 +75,33 @@ interface SuggestItem {
   value: string;
 }
 
-type Item = FileItem | CommandItem | CreateItem | QueryItem | MoreItem | SuggestItem;
+// An installed plugin, core or community: open its settings, list its commands, switch it on or off.
+interface PluginItem {
+  type: "plugin";
+  section: "插件";
+  plugin: PluginEntry;
+  match: CommandMatch;
+}
+
+// One of Obsidian's own settings pages.
+interface SettingItem {
+  type: "setting";
+  section: "设置";
+  page: SettingPage;
+  match: CommandMatch;
+}
+
+type Item = FileItem | CommandItem | CreateItem | QueryItem | MoreItem | SuggestItem | PluginItem | SettingItem;
+
+// Plugins and settings pages among other results; the command list shows more.
+const MIXED_HOST_LIMIT = 2;
+const HOST_LIMIT = 6;
 
 const FILTER_ICONS: Record<FilterKind, string> = { tag: "tag", path: "folder", ext: "file-type" };
+
+function pluginKey(plugin: PluginEntry): string {
+  return `${plugin.core ? "core" : "community"}:${plugin.id}`;
+}
 
 function filterToken(filter: Filter): string {
   return `${FILTER_KINDS.find((k) => k.kind === filter.kind)!.prefix}${filter.value}`;
@@ -135,6 +160,8 @@ function itemKey(item: Item): string {
   if (item.type === "query") return `query:${item.query}`;
   if (item.type === "more") return "more";
   if (item.type === "suggest") return `suggest:${item.kind}:${item.value}`;
+  if (item.type === "plugin") return `plugin:${pluginKey(item.plugin)}`;
+  if (item.type === "setting") return `setting:${item.page.id}`;
   return item.hit ? `hit:${item.file.path}:${item.hit.line}` : `file:${item.file.path}`;
 }
 
@@ -198,6 +225,9 @@ export class LauncherModal extends Modal {
   private moreButton: HTMLElement | null = null;
   private commands: Map<string, Command> | null = null;
   private commandIndex: CommandIndex | null = null;
+  // Plugins and settings pages with their name matchers, read once per panel and again after a switch.
+  private hosts: { plugins: Map<string, PluginEntry>; pages: Map<string, SettingPage>; pluginIndex: CommandIndex; pageIndex: CommandIndex } | null =
+    null;
 
   constructor(app: App, plugin: CrispSearchPlugin) {
     super(app);
@@ -524,7 +554,7 @@ export class LauncherModal extends Modal {
     this.lockedShown = false;
     this.modalEl.removeClass("is-locked");
     if (this.drill) this.items = this.hitItems(this.drill.item, query);
-    else if (commandMode) this.items = this.commandItems(query, Infinity);
+    else if (commandMode) this.items = [...this.hostItems(query, HOST_LIMIT), ...this.commandItems(query, Infinity)];
     else if (suggestions.length) this.items = suggestions;
     else this.items = query || filtered ? this.searchItems(query) : this.recentItems();
     this.selected = 0;
@@ -624,7 +654,8 @@ export class LauncherModal extends Modal {
       if (result.kind === "title") titles.push({ type: "file", section: "笔记", file, result });
       else bodies.push({ type: "file", section: "内容", file, result });
     }
-    const commands = scope === "all" && query && !this.filters.length ? this.commandItems(query, MIXED_COMMAND_LIMIT) : [];
+    const mixed = scope === "all" && query && !this.filters.length;
+    const commands = mixed ? [...this.commandItems(query, MIXED_COMMAND_LIMIT), ...this.hostItems(query, MIXED_HOST_LIMIT)] : [];
     const items: Item[] = [...titles, ...commands, ...bodies];
     if (page.total > page.results.length) {
       const shown = page.results.length;
@@ -648,6 +679,33 @@ export class LauncherModal extends Modal {
     }
     this.commands = available;
     return available;
+  }
+
+  private hostEntries(): NonNullable<LauncherModal["hosts"]> {
+    if (this.hosts) return this.hosts;
+    const plugins = new Map(listPlugins(this.app).map((plugin) => [pluginKey(plugin), plugin]));
+    const pages = new Map(listSettingPages(this.app).map((page) => [page.id, page]));
+    this.hosts = {
+      plugins,
+      pages,
+      pluginIndex: new CommandIndex([...plugins].map(([id, plugin]) => ({ id, name: plugin.name }))),
+      pageIndex: new CommandIndex([...pages.values()].map(({ id, name }) => ({ id, name }))),
+    };
+    return this.hosts;
+  }
+
+  // Plugins, then settings pages, matching the words; none for an empty field, which lists commands.
+  private hostItems(query: string, limit: number): Item[] {
+    if (!query) return [];
+    const { plugins, pages, pluginIndex, pageIndex } = this.hostEntries();
+    const items: Item[] = [];
+    for (const match of pluginIndex.search(query).slice(0, limit)) {
+      items.push({ type: "plugin", section: "插件", plugin: plugins.get(match.id)!, match });
+    }
+    for (const match of pageIndex.search(query).slice(0, limit)) {
+      items.push({ type: "setting", section: "设置", page: pages.get(match.id)!, match });
+    }
+    return items;
   }
 
   private commandItems(query: string, limit: number): Item[] {
@@ -695,6 +753,10 @@ export class LauncherModal extends Modal {
                 ? this.renderMoreRow(item, index)
                 : item.type === "suggest"
                   ? this.renderSuggestRow(item, index)
+                  : item.type === "plugin"
+                    ? this.renderPluginRow(item, index)
+                    : item.type === "setting"
+                      ? this.renderSettingRow(item, index)
             : item.hit
             ? this.renderHitRow(item, item.hit, index)
             : this.renderFileRow(item, index, query);
@@ -748,6 +810,24 @@ export class LauncherModal extends Modal {
       hits.createSpan({ text: `${hitLabel(result!.hitCount!)} 行` });
       setIcon(hits.createSpan("crisp-search-item-hits-icon"), "chevron-right");
     }
+    return row;
+  }
+
+  private renderPluginRow(item: PluginItem, index: number): HTMLElement {
+    const { plugin } = item;
+    const row = this.createRow(index, "plug");
+    const text = row.createDiv("crisp-search-item-text");
+    renderHighlighted(text.createSpan("crisp-search-item-title"), item.match.name, item.match.ranges);
+    if (plugin.description) text.createSpan({ cls: "crisp-search-item-subtitle", text: plugin.description });
+    const state = [plugin.core ? "核心插件" : "", plugin.enabled ? "" : "已停用"].filter(Boolean).join(" · ");
+    if (state) row.createDiv({ cls: "crisp-search-item-accessory", text: state });
+    return row;
+  }
+
+  private renderSettingRow(item: SettingItem, index: number): HTMLElement {
+    const row = this.createRow(index, "settings");
+    renderHighlighted(row.createDiv("crisp-search-item-text").createSpan("crisp-search-item-title"), item.match.name, item.match.ranges);
+    row.createDiv({ cls: "crisp-search-item-accessory", text: "设置" });
     return row;
   }
 
@@ -810,8 +890,10 @@ export class LauncherModal extends Modal {
     this.input.setAttr("aria-activedescendant", row.id);
     if (scroll) row.scrollIntoView({ block: "nearest" });
     const type = this.items[index].type;
-    const labels: Record<Item["type"], string> = { command: "运行", create: "新建", query: "搜索", file: "打开", more: "查看", suggest: "添加" };
-    this.primaryLabel?.setText(labels[type]);
+    const labels: Record<Item["type"], string> = {
+      command: "运行", create: "新建", query: "搜索", file: "打开", more: "查看", suggest: "添加", setting: "打开", plugin: "",
+    };
+    this.primaryLabel?.setText(labels[type] || (this.actionsFor(this.items[index])[0]?.label ?? "打开"));
     this.placeMoreButton(row, this.items[index]);
   }
 
@@ -859,6 +941,8 @@ export class LauncherModal extends Modal {
     if (item.type === "query") return this.queryActions as Action[];
     if (item.type === "more") return this.moreActions as Action[];
     if (item.type === "suggest") return this.suggestActions as Action[];
+    if (item.type === "setting") return [{ label: "打开", icon: "settings", keys: ["↵"], run: () => this.openPage(item.page.id) }];
+    if (item.type === "plugin") return this.pluginActions(item) as Action[];
     // Inserting needs a note open in an editor behind the panel.
     const fileActions = this.app.workspace.activeEditor?.editor
       ? this.fileActions
@@ -932,6 +1016,8 @@ export class LauncherModal extends Modal {
     else if (item.type === "query") this.searchAgain(item);
     else if (item.type === "more") this.openGlobalSearch();
     else if (item.type === "suggest") this.applySuggestion(item);
+    else if (item.type === "setting") this.openPage(item.page.id);
+    else if (item.type === "plugin") this.pluginActions(item)[0]?.run(item);
     else void this.openFile(item, mode);
   }
 
@@ -1080,6 +1166,50 @@ export class LauncherModal extends Modal {
     this.input.focus();
     const end = this.input.value.length;
     this.input.setSelectionRange(end, end);
+  }
+
+  // The first action is what Enter does: settings when the plugin has a page, else its commands, else switch it on.
+  private pluginActions(item: PluginItem): Action<PluginItem>[] {
+    const { plugin } = item;
+    const actions: Action<PluginItem>[] = [];
+    if (plugin.hasSettings) actions.push({ label: "打开设置", icon: "settings", keys: ["↵"], run: () => this.openPage(plugin.id) });
+    if (plugin.enabled) actions.push({ label: "查看命令", icon: "terminal-square", keys: [], run: () => this.showPluginCommands(plugin) });
+    // Switching this panel's own plugin off from inside it would close it mid-action.
+    if (plugin.id !== this.plugin.manifest.id || plugin.core) {
+      actions.push(
+        plugin.enabled
+          ? { label: "停用插件", icon: "power", keys: [], run: () => void this.switchPlugin(plugin, false) }
+          : { label: "启用插件", icon: "power", keys: [], run: () => void this.switchPlugin(plugin, true) },
+      );
+    }
+    if (actions[0]) actions[0] = { ...actions[0], keys: ["↵"] };
+    return actions;
+  }
+
+  private openPage(id: string): void {
+    this.close();
+    if (!openSettingPage(this.app, id)) new Notice("无法打开这个设置页");
+  }
+
+  // Commands carry their plugin's name in front, so the command list searched by that name shows them.
+  private showPluginCommands(plugin: PluginEntry): void {
+    this.input.value = plugin.name;
+    this.tab = "commands";
+    this.filters = [];
+    this.drill = null;
+    this.update();
+    this.input.focus();
+  }
+
+  private async switchPlugin(plugin: PluginEntry, on: boolean): Promise<void> {
+    const done = await setPluginEnabled(this.app, plugin, on);
+    new Notice(done ? `已${on ? "启用" : "停用"} ${plugin.name}` : `无法${on ? "启用" : "停用"} ${plugin.name}`);
+    // Its commands and settings page come and go with it.
+    this.hosts = null;
+    this.commands = null;
+    this.commandIndex = null;
+    this.lastSearch = null;
+    this.refreshKeepingSelection();
   }
 
   private commandScope(): boolean {
