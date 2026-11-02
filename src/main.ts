@@ -19,7 +19,7 @@ import { ActivationOutcome, LicenseController, LicenseResult } from "./license-c
 import { LauncherModal } from "./modal";
 import { CrispSearchSettingTab } from "./settings-tab";
 import { SortOrder, isSortOrder } from "./sort";
-import { UsageStore, indexedDbBackend, memoryBackend, openUsageDatabase } from "./usage";
+import { UsageStore, bodyOrder, indexedDbBackend, memoryBackend, openUsageDatabase } from "./usage";
 
 const PLUGIN_ID = "crisp-search";
 
@@ -59,6 +59,7 @@ function normalizeSettings(raw: unknown): SearchSettings {
 }
 
 const RECENT_COMMAND_LIMIT = 20;
+const USAGE_WAIT_MS = 1000;
 const RECENT_QUERY_LIMIT = 10;
 
 // Obsidian has no public API to list, look up hotkeys for or run commands; every launcher uses these.
@@ -86,6 +87,7 @@ function sliceBreak(): Promise<void> {
 export default class CrispSearchPlugin extends Plugin {
   usage: UsageStore | null = null;
   private usageDb: IDBDatabase | null = null;
+  private usageLoaded: Promise<void> = Promise.resolve();
   readonly engine = new SearchEngine();
   indexed = 0;
   total = 0;
@@ -163,7 +165,7 @@ export default class CrispSearchPlugin extends Plugin {
       // Obsidian queues this callback; the plugin may have been disabled or reloaded before it runs.
       if (this.unloaded) return;
       this.watchVault();
-      void this.startUsage();
+      this.usageLoaded = this.startUsage();
       this.startIndexIfLicensed();
       void this.licenseController.refreshInBackground().catch((error) => {
         console.debug("Crisp Search background license check failed", error);
@@ -325,6 +327,13 @@ export default class CrispSearchPlugin extends Plugin {
         if (file && this.settings.learnUsage) store.recordVisit(file.path);
       }),
     );
+  }
+
+  // Usage only decides the order of the body pass, so a database that hangs must not hold the pass up.
+  private async usageSettled(): Promise<void> {
+    let timer = 0;
+    await Promise.race([this.usageLoaded, new Promise((resolve) => (timer = window.setTimeout(resolve, USAGE_WAIT_MS)))]);
+    window.clearTimeout(timer);
   }
 
   recordOpen(query: string, path: string): void {
@@ -489,8 +498,16 @@ export default class CrispSearchPlugin extends Plugin {
     this.namesReady = true;
     const namesMs = performance.now() - started;
     this.emitProgress();
-    // Second pass: bodies.
-    for (const file of files) {
+    // Second pass: bodies, the ones most likely to be searched for first.
+    await this.usageSettled();
+    if (!current()) return;
+    const usage = this.settings.learnUsage ? this.usage : null;
+    const ordered = bodyOrder(files, (file) => ({
+      note: file.extension === "md",
+      activity: usage?.activity(file.path) ?? 0,
+      mtime: file.stat?.mtime ?? 0,
+    }));
+    for (const file of ordered) {
       if (!current()) return;
       try {
         await this.indexFile(file, current);

@@ -21,7 +21,7 @@ await esbuild.build({
   plugins: [{ name: "obsidian-stub", setup: (b) => b.onResolve({ filter: /^obsidian$/ }, () => ({ path: pathToFileURL(stub).href, external: true })) }],
 });
 // onload schedules the licence expiry check on window.
-globalThis.window ??= { setInterval: () => 0, clearInterval() {}, setTimeout };
+globalThis.window ??= { setInterval: () => 0, clearInterval() {}, setTimeout, clearTimeout };
 const { default: CrispSearchPlugin } = await import(pathToFileURL(path.join(outDir, "main.mjs")).href);
 
 async function setup(options = {}) {
@@ -373,4 +373,46 @@ test("a re-index keeps bodies searchable while the names pass runs", async () =>
   assert.equal(plugin.engine.search("keptmarker").length, 3);
   release();
   await building;
+});
+
+test("bodies are read most used first, then newest, attachments last", async () => {
+  const reads = [];
+  const { plugin, files } = await setup({
+    paths: ["old.md", "photo.png", "new.md", "used.md"],
+    read: (file) => {
+      reads.push(file.path);
+      return "正文";
+    },
+  });
+  const mtimes = { "old.md": 1, "photo.png": 9, "new.md": 5, "used.md": 2 };
+  for (const file of files) file.stat = { mtime: mtimes[file.path], ctime: 0, size: 0 };
+  plugin.usage = { activity: (p) => (p === "used.md" ? 1 : 0) };
+  await plugin.rebuildIndex();
+  assert.deepEqual(reads, ["used.md", "new.md", "old.md"]);
+  assert.equal(plugin.engine.has("photo.png"), true);
+  assert.equal(plugin.ready, true);
+});
+
+test("with learning off the body order ignores use", async () => {
+  const reads = [];
+  const { plugin, files } = await setup({
+    data: { learnUsage: false },
+    paths: ["new.md", "used.md"],
+    read: (file) => {
+      reads.push(file.path);
+      return "正文";
+    },
+  });
+  files[0].stat = { mtime: 5, ctime: 0, size: 0 };
+  files[1].stat = { mtime: 2, ctime: 0, size: 0 };
+  plugin.usage = { activity: (p) => (p === "used.md" ? 1 : 0) };
+  await plugin.rebuildIndex();
+  assert.deepEqual(reads, ["new.md", "used.md"]);
+});
+
+test("a usage database that never answers does not stop the bodies", async () => {
+  const { plugin } = await setup();
+  plugin.usageLoaded = new Promise(() => {});
+  await plugin.rebuildIndex();
+  assert.equal(plugin.ready, true);
 });

@@ -27,6 +27,15 @@ export function usageQuery(query: string): string {
   return query.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+// Bodies to read first: notes before attachments, which have no body, then the notes used most, then the
+// newest. Search words are most likely to be looking for these, so they should not wait for the whole vault.
+export function bodyOrder<T>(files: T[], describe: (file: T) => { note: boolean; activity: number; mtime: number }): T[] {
+  return files
+    .map((file) => ({ file, ...describe(file) }))
+    .sort((a, b) => Number(b.note) - Number(a.note) || b.activity - a.activity || b.mtime - a.mtime)
+    .map(({ file }) => file);
+}
+
 export class UsageStore {
   private readonly visits = new Map<string, number[]>();
   // Search words → note path → opens.
@@ -65,11 +74,17 @@ export class UsageStore {
     this.write(this.backend.put("queries", `${words}${SEPARATOR}${path}`, count));
   }
 
-  // Multiplier share for a result: 0 for a note never opened, more the more often and recently it was.
-  boost(query: string, path: string): number {
+  // How much a note is in use: its visits, each fading with time.
+  activity(path: string): number {
     const now = this.now();
     let weight = 0;
     for (const time of this.visits.get(path) ?? []) weight += 0.5 ** (Math.max(0, now - time) / DAY / HALF_LIFE_DAYS);
+    return weight;
+  }
+
+  // Multiplier share for a result: 0 for a note never opened, more the more often and recently it was.
+  boost(query: string, path: string): number {
+    const weight = this.activity(path);
     const opens = this.queries.get(usageQuery(query))?.get(path) ?? 0;
     return VISIT_BOOST * (1 - 0.5 ** weight) + (opens > 0 ? FIRST_OPEN_BOOST : 0);
   }

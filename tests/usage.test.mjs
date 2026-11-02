@@ -150,3 +150,16 @@ test("a failed write keeps the session working", async () => {
     console.warn = warn;
   }
 });
+
+test("activity grows with visits and fades with time", () => {
+  let now = 100 * DAY;
+  const usage = new UsageStore(fakeBackend(), () => now);
+  assert.equal(usage.activity("a.md"), 0);
+  usage.recordVisit("a.md");
+  now += 10 * 60_000;
+  usage.recordVisit("a.md");
+  const fresh = usage.activity("a.md");
+  assert.ok(fresh > 1.9 && fresh <= 2);
+  now += 14 * DAY;
+  assert.ok(Math.abs(usage.activity("a.md") - fresh / 2) < 0.01);
+});
