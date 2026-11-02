@@ -421,3 +421,52 @@ test("folder matches never push body matches out of a cut list", () => {
   assert.equal(total, 81);
   assert.equal(results[0].path, "Topics/body.md");
 });
+
+test("typo tolerance stays out while the words as typed find enough notes", () => {
+  const exact = Array.from({ length: 5 }, (_, i) => doc(`e${i}.md`, "obsidian notes"));
+  const engine = engineWith(...exact, doc("typo.md", "obsidiam notes"));
+  assert.equal(engine.searchPage("obsidian").total, 5);
+  assert.equal(engine.searchPage("obsidiam").total, 6);
+});
+
+test("too few exact matches let the typo-tolerant ones in, exact ones first", () => {
+  const engine = engineWith(doc("typo.md", "obsidiam notes"), doc("right.md", "obsidian notes"));
+  assert.deepEqual(engine.searchPage("obsidian").results.map((r) => r.path), ["right.md", "typo.md"]);
+});
+
+test("the threshold counts what the filters and the tab let through", () => {
+  const exact = Array.from({ length: 5 }, (_, i) => doc(`private/e${i}.md`, "obsidian notes"));
+  const engine = engineWith(...exact, doc("typo.md", "obsidiam notes"));
+  const page = engine.searchPage("obsidian", { keep: (p) => !p.startsWith("private/") });
+  assert.deepEqual(page.results.map((r) => r.path), ["typo.md"]);
+});
+
+test("the hit list of an exact result does not count fuzzy lines", () => {
+  const engine = engineWith(doc("a.md", "obsidian one\nobsidiam two"));
+  assert.deepEqual(engine.hits("a.md", "obsidian").map((h) => h.line), [0]);
+  assert.equal(engine.hits("a.md", "obsidiam").length, 1);
+});
+
+test("learned notes lead every group in the given order, and a non-match stays out", () => {
+  const engine = engineWith(doc("needle.md", "x"), doc("b.md", "needle body"), doc("c.md", "needle body"), doc("d.md", "nothing"));
+  const page = engine.searchPage("needle", { first: ["c.md", "d.md"] });
+  assert.equal(page.results[0].path, "c.md");
+  assert.equal(page.results[0].kind, "content");
+  assert.equal(page.results[1].path, "needle.md");
+  assert.ok(!page.results.some((r) => r.path === "d.md"));
+});
+
+test("a new note's name finds close notes, by alias too, closest first", () => {
+  const engine = new SearchEngine();
+  const add = (path, aliases = [], extension = "md") => engine.upsert({
+    path, basename: path.replace(/\.[^.]+$/, "").split("/").pop(), extension, content: "", headings: [], tags: [], aliases,
+  });
+  add("near/知识库设计方案.md");
+  add("copy/知识库设计 副本.md");
+  add("别名笔记.md", ["知识库设计"]);
+  add("知识库设计.png", [], "png");
+  add("hidden/知识库设计 1.md");
+  add("其他.md");
+  const found = engine.similarNotes("知识库设计", (p) => !p.startsWith("hidden/"));
+  assert.deepEqual(found, ["copy/知识库设计 副本.md", "别名笔记.md", "near/知识库设计方案.md"]);
+});

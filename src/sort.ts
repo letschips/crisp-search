@@ -34,6 +34,8 @@ export function resultOrder<T extends Ranked>(
   order: SortOrder,
   stat: (path: string) => Stat,
   now = Date.now(),
+  // The share a note's use adds to its score; only the two relevance orders take it.
+  usage?: (path: string) => number,
 ): ((a: T, b: T) => number) | undefined {
   // Each path is looked up once per sort, not on every comparison.
   const stats = new Map<string, Stat>();
@@ -41,10 +43,17 @@ export function resultOrder<T extends Ranked>(
     if (!stats.has(path)) stats.set(path, stat(path));
     return stats.get(path);
   };
+  const boosts = new Map<string, number>();
+  const used = (path: string) => {
+    if (!usage) return 1;
+    let boost = boosts.get(path);
+    if (boost === undefined) boosts.set(path, (boost = usage(path)));
+    return 1 + boost;
+  };
   const time = (key: "mtime" | "ctime") => (a: T, b: T) => (cached(b.path)?.[key] ?? 0) - (cached(a.path)?.[key] ?? 0);
   switch (order) {
     case "relevance":
-      return undefined;
+      return usage ? (a, b) => b.score * used(b.path) - a.score * used(a.path) : undefined;
     case "modified":
       return time("mtime");
     case "created":
@@ -54,7 +63,7 @@ export function resultOrder<T extends Ranked>(
     case "recent": {
       const boosted = (r: T) => {
         const age = Math.max(0, now - (cached(r.path)?.mtime ?? 0)) / DAY;
-        return r.score * (1 + RECENT_BOOST * 0.5 ** (age / HALF_LIFE_DAYS));
+        return r.score * (1 + RECENT_BOOST * 0.5 ** (age / HALF_LIFE_DAYS)) * used(r.path);
       };
       return (a, b) => boosted(b) - boosted(a);
     }

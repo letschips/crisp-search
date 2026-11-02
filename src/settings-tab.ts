@@ -153,6 +153,23 @@ export class CrispSearchSettingTab extends PluginSettingTab {
           }),
       );
     new Setting(containerEl)
+      .setName("根据使用习惯排序")
+      .setDesc("记住打开过的笔记和搜索词，常用的排在前面；同一个词打开同一篇两次后，它会列在最前。只存在这台设备上，不随仓库同步。")
+      .addToggle((toggle) =>
+        toggle.setValue(plugin.settings.learnUsage).onChange((value) => {
+          plugin.settings.learnUsage = value;
+          void plugin.saveSettings();
+        }),
+      )
+      .addButton((button) =>
+        button.setButtonText("清除").onClick(() => {
+          void plugin.clearUsage().then(
+            () => new Notice("已清除使用记录"),
+            () => new Notice("清除使用记录失败"),
+          );
+        }),
+      );
+    new Setting(containerEl)
       .setName("新建笔记位置")
       .setDesc("搜索词作为笔记名新建时放在哪个文件夹。留空则跟随 Obsidian「文件与链接」里的新建笔记位置。")
       .addText((text) => {

@@ -31,7 +31,7 @@ async function setup(options = {}) {
   const files = (options.paths ?? ["a.md", "bad.md", "z.md"]).map((p) => new TFile(p));
   const events = {};
   const app = {
-    workspace: { layoutReady: true, onLayoutReady: (fn) => fn() },
+    workspace: { layoutReady: true, onLayoutReady: (fn) => fn(), on: () => ({}) },
     vault: {
       on: (name, fn) => (events[`vault:${name}`] = fn),
       getFiles: () => files,
@@ -92,6 +92,7 @@ test("recent commands load from data.json and are saved most recent first", asyn
     newNoteFolder: "",
     excludedFolders: [],
     recentQueries: [],
+    learnUsage: true,
   });
 });
 

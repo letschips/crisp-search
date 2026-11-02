@@ -43,3 +43,16 @@ test("typing an existing file's full name opens that file rather than offering a
   assert.equal(newNoteName("needle.md", files("needle.md")), "");
   assert.equal(newNoteName("photo.jpg", files("images/photo.png")), "photo.jpg");
 });
+
+test("names count as close for spacing, a copy marker, reordered words, or holding most of the other", async () => {
+  const { nameCloseness } = await import(pathToFileURL(path.join(outDir, "note-name.mjs")).href);
+  assert.equal(nameCloseness("知识库 设计", "知识库设计"), 3);
+  assert.equal(nameCloseness("方案", "方案 副本"), 3);
+  assert.equal(nameCloseness("Plan", "plan (2)"), 3);
+  assert.equal(nameCloseness("health check", "Check Health"), 2);
+  assert.equal(nameCloseness("知识库设计", "知识库设计方案"), 1);
+  assert.equal(nameCloseness("知识库", "知识库设计方案与实施路线"), 0);
+  assert.equal(nameCloseness("设计", "设计方案"), 0);
+  assert.equal(nameCloseness("苹果", "香蕉"), 0);
+  assert.equal(nameCloseness("???", "!!!"), 0);
+});

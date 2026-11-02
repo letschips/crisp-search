@@ -1,5 +1,6 @@
 import MiniSearch, { SearchOptions } from "minisearch";
 import { pinyin } from "pinyin-pro";
+import { nameCloseness } from "./note-name";
 
 // Han, kana and hangul have no spaces between words, so they are indexed as overlapping bigrams.
 // That needs no dictionary and finds any word inside a sentence.
@@ -67,6 +68,8 @@ export interface PageOptions {
   order?: (a: SearchResult, b: SearchResult) => number;
   keep?: (path: string) => boolean;
   accept?: (result: SearchResult) => boolean;
+  // Paths to list ahead of every group, in this order, when they match at all.
+  first?: string[];
 }
 
 export interface Page {
@@ -371,6 +374,10 @@ const SEARCH_OPTIONS: SearchOptions = {
   prefix: (term: string) => !isCjk(term) || term.length === 1,
   fuzzy: (term: string) => (fuzzyDistance(term) ? FUZZY : 0),
 };
+const EXACT_OPTIONS: SearchOptions = { ...SEARCH_OPTIONS, fuzzy: false };
+// Typo tolerance is the costly part of a search and the noisy part of its results, so it only steps in when
+// the words as typed find fewer notes than this.
+const FUZZY_BELOW = 5;
 
 export class SearchEngine {
   private readonly docs = new Map<string, SearchDoc>();
@@ -479,7 +486,12 @@ export class SearchEngine {
     const doc = this.docs.get(path);
     const parts = queryParts(query);
     if (!doc || parts.length === 0) return [];
-    const [hit] = this.index.search(parts.join(" "), { ...SEARCH_OPTIONS, filter: (result) => result.id === path });
+    // The same tiers as the search that listed this note: fuzzy terms only when the exact words miss it.
+    const filter = (result: { id: unknown }) => result.id === path;
+    const [hit] = [
+      ...this.index.search(parts.join(" "), { ...EXACT_OPTIONS, filter }),
+      ...this.index.search(parts.join(" "), { ...SEARCH_OPTIONS, filter }),
+    ];
     return hit ? makeExcerpts(doc.content, this.bodyQuery(path, parts), hit.terms) : [];
   }
 
@@ -522,6 +534,17 @@ export class SearchEngine {
     return this.searchPage(query, { limit, order, keep }).results;
   }
 
+  // Notes a new note of this name would duplicate, closest first; aliases count as names.
+  similarNotes(name: string, keep: (path: string) => boolean = () => true, limit = 5): string[] {
+    const found: { path: string; closeness: number }[] = [];
+    for (const doc of this.docs.values()) {
+      if (doc.extension !== "md" || !keep(doc.path)) continue;
+      const closeness = Math.max(...[doc.basename, ...doc.aliases].map((other) => nameCloseness(name, other)));
+      if (closeness > 0) found.push({ path: doc.path, closeness });
+    }
+    return found.sort((a, b) => b.closeness - a.closeness || a.path.localeCompare(b.path)).slice(0, limit).map((f) => f.path);
+  }
+
   doc(path: string): SearchDoc | undefined {
     return this.docs.get(path);
   }
@@ -531,45 +554,51 @@ export class SearchEngine {
   // searches (excluded folders not yet removed, filters), `accept` drops results by how they matched (scope
   // tabs). `total` counts every match both let through, so the panel can say how many the cut left out.
   searchPage(query: string, options: PageOptions = {}): Page {
-    const { limit = 60, order, keep, accept } = options;
+    const { limit = 60, order, keep, accept, first = [] } = options;
     const parts = queryParts(query);
     if (parts.length === 0) return { results: [], total: 0 };
-    const hits = this.index.search(parts.join(" "), SEARCH_OPTIONS);
     const lowerParts = parts.map((p) => p.toLowerCase());
     // Case-insensitive patterns test the text in place; lowercasing every matching note costs far more.
     const literals = parts.map((p) => new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "iu"));
-    const results: SearchResult[] = [];
-    for (const hit of hits) {
-      const doc = this.docs.get(hit.id as string);
-      if (!doc || (keep && !keep(doc.path))) continue;
-      const fields = new Set(Object.values(hit.match).flat());
-      // A title hit needs every query word answered by the name, aliases or folder; otherwise the body
-      // carries part of the match and the result must show where.
-      const inTitle = (part: string) => this.inTitle(doc.path, part);
-      const inName = (part: string) => this.inName(doc.path, part);
-      const body: MatchKind = fields.has("headings") ? "heading" : "content";
-      // The name must answer at least one word; a match the folder alone answers shows the body if that also
-      // matched, and otherwise counts as a folder match.
-      const kind: MatchKind = !([...fields].every((f) => TITLE_FIELDS.has(f)) || lowerParts.every(inTitle))
-        ? body
-        : lowerParts.some(inName)
-          ? "title"
-          : fields.has("content") || fields.has("headings") || fields.has("properties")
-            ? body
-            : "folder";
-      // Bigram AND also matches scattered characters; a literal phrase is what the user meant.
-      const title = doc.basename.toLowerCase();
-      const phrase = lowerParts.join(" ");
-      let score = hit.score;
-      if (title === phrase || `${title}.${doc.extension}` === phrase) score *= 3;
-      else if (lowerParts.every((p) => title.includes(p))) score *= 2;
-      else if (literals.every((literal) => literal.test(doc.content))) score *= 1.5;
-      const result: SearchResult = { path: doc.path, basename: doc.basename, extension: doc.extension, kind, score, terms: hit.terms };
-      if (!accept || accept(result)) results.push(result);
-    }
+    const collect = (searchOptions: SearchOptions): SearchResult[] => {
+      const results: SearchResult[] = [];
+      for (const hit of this.index.search(parts.join(" "), searchOptions)) {
+        const doc = this.docs.get(hit.id as string);
+        if (!doc || (keep && !keep(doc.path))) continue;
+        const fields = new Set(Object.values(hit.match).flat());
+        // A title hit needs every query word answered by the name, aliases or folder; otherwise the body
+        // carries part of the match and the result must show where.
+        const inTitle = (part: string) => this.inTitle(doc.path, part);
+        const inName = (part: string) => this.inName(doc.path, part);
+        const body: MatchKind = fields.has("headings") ? "heading" : "content";
+        // The name must answer at least one word; a match the folder alone answers shows the body if that also
+        // matched, and otherwise counts as a folder match.
+        const kind: MatchKind = !([...fields].every((f) => TITLE_FIELDS.has(f)) || lowerParts.every(inTitle))
+          ? body
+          : lowerParts.some(inName)
+            ? "title"
+            : fields.has("content") || fields.has("headings") || fields.has("properties")
+              ? body
+              : "folder";
+        // Bigram AND also matches scattered characters; a literal phrase is what the user meant.
+        const title = doc.basename.toLowerCase();
+        const phrase = lowerParts.join(" ");
+        let score = hit.score;
+        if (title === phrase || `${title}.${doc.extension}` === phrase) score *= 3;
+        else if (lowerParts.every((p) => title.includes(p))) score *= 2;
+        else if (literals.every((literal) => literal.test(doc.content))) score *= 1.5;
+        const result: SearchResult = { path: doc.path, basename: doc.basename, extension: doc.extension, kind, score, terms: hit.terms };
+        if (!accept || accept(result)) results.push(result);
+      }
+      return results;
+    };
+    // Counted after the filters and the tab: a tab with too few exact matches still gets the typo-tolerant ones.
+    let results = collect(EXACT_OPTIONS);
+    if (results.length < FUZZY_BELOW) results = collect(SEARCH_OPTIONS);
     const within = order ?? ((a: SearchResult, b: SearchResult) => b.score - a.score);
-    const group = (r: SearchResult) => (r.kind === "title" ? 0 : r.kind === "folder" ? 2 : 1);
-    results.sort((a, b) => group(a) - group(b) || within(a, b));
+    const lead = new Map(first.map((path, i) => [path, i]));
+    const group = (r: SearchResult) => (lead.has(r.path) ? -1 : r.kind === "title" ? 0 : r.kind === "folder" ? 2 : 1);
+    results.sort((a, b) => group(a) - group(b) || (lead.get(a.path) ?? 0) - (lead.get(b.path) ?? 0) || within(a, b));
     const top = results.slice(0, limit);
     for (const result of top) {
       const doc = this.docs.get(result.path)!;

@@ -50,3 +50,11 @@ test("unknown stored values are rejected", () => {
   assert.equal(isSortOrder("modified"), true);
   assert.equal(isSortOrder("random"), false);
 });
+
+test("use lifts a note within the relevance orders and leaves time and name orders alone", () => {
+  const usage = (p) => (p === "old.md" ? 0.5 : 0);
+  const order = (name) => [r("old.md", 10), r("fresh.md", 12)].sort(resultOrder(name, (p) => stats[p], NOW, usage)).map((x) => x.path);
+  assert.deepEqual(order("relevance"), ["old.md", "fresh.md"]);
+  assert.deepEqual(order("modified"), ["fresh.md", "old.md"]);
+  assert.deepEqual(order("name"), ["fresh.md", "old.md"]);
+});

@@ -19,6 +19,7 @@ import { ActivationOutcome, LicenseController, LicenseResult } from "./license-c
 import { LauncherModal } from "./modal";
 import { CrispSearchSettingTab } from "./settings-tab";
 import { SortOrder, isSortOrder } from "./sort";
+import { UsageStore, indexedDbBackend, memoryBackend, openUsageDatabase } from "./usage";
 
 const PLUGIN_ID = "crisp-search";
 
@@ -31,6 +32,7 @@ export interface SearchSettings {
   // Kept out of the index on top of Obsidian's own excluded files.
   excludedFolders: string[];
   recentQueries: string[];
+  learnUsage: boolean;
 }
 
 function strings(value: unknown): string[] {
@@ -52,6 +54,7 @@ function normalizeSettings(raw: unknown): SearchSettings {
     newNoteFolder: typeof data.newNoteFolder === "string" ? data.newNoteFolder : "",
     excludedFolders: folderList(strings(data.excludedFolders)),
     recentQueries: strings(data.recentQueries).filter(Boolean).slice(0, RECENT_QUERY_LIMIT),
+    learnUsage: data.learnUsage !== false,
   };
 }
 
@@ -81,6 +84,8 @@ function sliceBreak(): Promise<void> {
 }
 
 export default class CrispSearchPlugin extends Plugin {
+  usage: UsageStore | null = null;
+  private usageDb: IDBDatabase | null = null;
   readonly engine = new SearchEngine();
   indexed = 0;
   total = 0;
@@ -158,6 +163,7 @@ export default class CrispSearchPlugin extends Plugin {
       // Obsidian queues this callback; the plugin may have been disabled or reloaded before it runs.
       if (this.unloaded) return;
       this.watchVault();
+      void this.startUsage();
       this.startIndexIfLicensed();
       void this.licenseController.refreshInBackground().catch((error) => {
         console.debug("Crisp Search background license check failed", error);
@@ -167,6 +173,7 @@ export default class CrispSearchPlugin extends Plugin {
 
   onunload(): void {
     this.unloaded = true;
+    this.usageDb?.close();
     this.stopIndex();
     this.licenseController.dispose();
     this.progressListeners.clear();
@@ -295,6 +302,39 @@ export default class CrispSearchPlugin extends Plugin {
     void this.saveSettings();
   }
 
+  // Follows the store only once it has loaded, so nothing recorded earlier can be overwritten by the load.
+  private async startUsage(): Promise<void> {
+    let store = new UsageStore(memoryBackend);
+    try {
+      const appId = (this.app as unknown as { appId?: string }).appId ?? this.app.vault.getName();
+      const db = await openUsageDatabase(`crisp-search/${appId}`);
+      if (this.unloaded) {
+        db.close();
+        return;
+      }
+      this.usageDb = db;
+      store = new UsageStore(indexedDbBackend(db));
+      await store.load();
+    } catch (error) {
+      console.warn("Crisp Search: usage history lasts for this session only", error);
+    }
+    if (this.unloaded) return;
+    this.usage = store;
+    this.registerEvent(
+      this.app.workspace.on("file-open", (file) => {
+        if (file && this.settings.learnUsage) store.recordVisit(file.path);
+      }),
+    );
+  }
+
+  recordOpen(query: string, path: string): void {
+    if (this.settings.learnUsage) this.usage?.recordOpen(query, path);
+  }
+
+  clearUsage(): Promise<void> {
+    return this.usage?.clear() ?? Promise.resolve();
+  }
+
   get recentQueries(): string[] {
     return this.settings.recentQueries;
   }
@@ -379,9 +419,15 @@ export default class CrispSearchPlugin extends Plugin {
       }),
     );
     this.registerEvent(this.app.vault.on("create", (file) => this.indexStarted && this.onFileEvent(file)));
-    this.registerEvent(this.app.vault.on("delete", (file) => this.indexStarted && this.removePath(file.path)));
+    this.registerEvent(
+      this.app.vault.on("delete", (file) => {
+        this.usage?.remove(file.path);
+        if (this.indexStarted) this.removePath(file.path);
+      }),
+    );
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
+        this.usage?.rename(oldPath, file.path);
         if (!this.indexStarted) return;
         this.removePath(oldPath);
         this.onFileEvent(file);

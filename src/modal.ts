@@ -59,6 +59,8 @@ interface CreateItem {
   type: "create";
   section: "";
   name: string;
+  // The user has seen the notes this one might duplicate.
+  confirmed?: boolean;
 }
 
 // A search typed before; choosing it puts it back in the field.
@@ -645,6 +647,7 @@ export class LauncherModal extends Modal {
   }
 
   private searchItems(query: string): Item[] {
+    const learned: FileItem[] = [];
     const titles: FileItem[] = [];
     const bodies: Item[] = [];
     const folders: Item[] = [];
@@ -660,10 +663,15 @@ export class LauncherModal extends Modal {
       return !doc || matchesFilters(doc, this.filters);
     };
     const scope = this.tab;
+    const usage = this.plugin.settings.learnUsage && (this.sortOrder === "recent" || this.sortOrder === "relevance")
+      ? this.plugin.usage
+      : null;
+    const first = query && usage ? usage.learned(query) : [];
+    const boost = usage ? (path: string) => usage.boost(query, path) : undefined;
     // Filters with no words list files, in the chosen time or name order, or newest first.
     const listOrder: SortOrder = ["modified", "created", "name"].includes(this.sortOrder) ? this.sortOrder : "modified";
     const page = query
-      ? engine.searchPage(query, { order: resultOrder(this.sortOrder, stat), keep, accept: (r) => scopeAccepts(scope, r.kind, r.extension) })
+      ? engine.searchPage(query, { order: resultOrder(this.sortOrder, stat, Date.now(), boost), first, keep, accept: (r) => scopeAccepts(scope, r.kind, r.extension) })
       : engine.listPage({
           order: resultOrder(listOrder, stat),
           keep,
@@ -672,13 +680,14 @@ export class LauncherModal extends Modal {
     for (const result of page.results) {
       const file = this.app.vault.getAbstractFileByPath(result.path);
       if (!(file instanceof TFile)) continue;
-      if (result.kind === "title") titles.push({ type: "file", section: "笔记", file, result });
+      if (first.includes(result.path)) learned.push({ type: "file", section: "常用", file, result });
+      else if (result.kind === "title") titles.push({ type: "file", section: "笔记", file, result });
       else if (result.kind === "folder") folders.push({ type: "file", section: "所在文件夹", file, result });
       else bodies.push({ type: "file", section: "内容", file, result });
     }
     const mixed = scope === "all" && query && !this.filters.length;
     const commands = mixed ? [...this.commandItems(query, MIXED_COMMAND_LIMIT), ...this.hostItems(query, MIXED_HOST_LIMIT)] : [];
-    const items: Item[] = [...titles, ...commands, ...bodies, ...folders];
+    const items: Item[] = [...learned, ...titles, ...commands, ...bodies, ...folders];
     if (page.total > page.results.length) {
       const shown = page.results.length;
       if (this.globalSearch()) items.push({ type: "more", section: "", shown, total: page.total });
@@ -1120,6 +1129,7 @@ export class LauncherModal extends Modal {
 
   // A note of that name already in the folder is opened instead of being created twice.
   private async createNote(item: CreateItem, mode: OpenMode): Promise<void> {
+    if (!item.confirmed && this.showSimilarNotes(item)) return;
     this.rememberQuery();
     this.close();
     try {
@@ -1134,6 +1144,22 @@ export class LauncherModal extends Modal {
       console.error("Crisp Search: could not create note", error);
       new Notice(`新建笔记失败：${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  // Notes this one might duplicate come up first: ↵ opens one, ⇧↵ creates anyway, typing goes back to the results.
+  private showSimilarNotes(item: CreateItem): boolean {
+    const similar = this.plugin.engine.similarNotes(item.name, (path) => !this.plugin.isIgnored(path));
+    const items: Item[] = [];
+    for (const path of similar) {
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (file instanceof TFile) items.push({ type: "file", section: "已有相近的笔记", file });
+    }
+    if (!items.length) return false;
+    this.items = [...items, { ...item, confirmed: true }];
+    this.selected = 0;
+    this.toggleActions(false);
+    this.render(this.input.value.trim(), false);
+    return true;
   }
 
   // Checked again at run time; only a command the host accepted goes into recent use.
@@ -1162,6 +1188,7 @@ export class LauncherModal extends Modal {
 
   private async openFile(item: FileItem, mode: OpenMode): Promise<void> {
     this.rememberQuery();
+    if (item.result && !this.commandScope()) this.plugin.recordOpen(splitQuery(this.input.value).text, item.file.path);
     this.close();
     const workspace = this.app.workspace;
     const leaf = mode === "split" ? workspace.getLeaf("split", "vertical") : workspace.getLeaf(mode === "tab" ? "tab" : false);
