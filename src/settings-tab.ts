@@ -1,4 +1,5 @@
-import { AbstractInputSuggest, App, Notice, PluginSettingTab, Setting, TFolder, normalizePath } from "obsidian";
+import { AbstractInputSuggest, App, Notice, PluginSettingTab, Setting, TFolder, normalizePath, setIcon } from "obsidian";
+import { CRISP_SEARCH_ICON } from "./icon";
 import type CrispSearchPlugin from "./main";
 import { SORT_ORDERS, isSortOrder } from "./sort";
 
@@ -45,6 +46,10 @@ export class CrispSearchSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
+    const brandHeader = containerEl.createDiv({ cls: "crisp-brand-header" });
+    setIcon(brandHeader.createDiv({ cls: "crisp-brand-logo" }), CRISP_SEARCH_ICON);
+    brandHeader.createEl("h2", { text: "Crisp Search" });
+    containerEl.createEl("p", { text: "想找的，一搜就到", cls: "crisp-brand-slogan" });
     this.renderLicense(containerEl);
     this.renderSearch(containerEl);
     this.renderAbout(containerEl);
