@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.0
+
+- 新增：其他插件的内容可以出现在搜索面板里，各有自己的页签。装了 Crisp Tempo 0.18.0 会多一个「任务」页签，装了 Crisp Pulse 1.47.0 会多一个「速记」页签；回车跳到对应的任务或速记。任务也会出现在「全部」页签里（最多 3 条）。
+- 新增：给插件作者的接口 `registerSearchProvider()`（`searchProviderApiVersion` 为 1），Crisp Search 就绪时发出工作区事件 `crisp-search:ready`。
+
 ## 0.7.2
 
 - 优化：启动后正文按常用程度和修改时间的先后建立索引，最近在用的笔记很快就能搜到正文，不用等全库读完。

@@ -147,6 +147,14 @@
   flex: none;
   gap: 4px;
   padding: 0 16px 10px;
+  /* Tabs added by other plugins can outgrow a phone's width. */
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.crisp-search-scope {
+  flex: none;
+  white-space: nowrap;
 }
 
 .crisp-search-scope {
@@ -165,6 +173,11 @@
   background: var(--crisp-search-hover);
   color: var(--text-normal);
   font-weight: 600;
+}
+
+/* Finished items from other plugins (a done task) stay findable but read as done. */
+.crisp-search-item.is-done .crisp-search-item-title {
+  color: var(--text-muted);
 }
 
 .crisp-search-panel.is-locked .crisp-search-scopes {

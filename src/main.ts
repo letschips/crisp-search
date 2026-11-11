@@ -17,6 +17,7 @@ import { CRISP_SEARCH_ICON, CRISP_SEARCH_ICON_SVG, PANEL_MENU_ICON, PANEL_MENU_I
 import { discoverVaultCrispLicenses, verifyLicenseCode } from "./license";
 import { ActivationOutcome, LicenseController, LicenseResult } from "./license-controller";
 import { LauncherModal } from "./modal";
+import { ProviderRegistry, SEARCH_PROVIDER_API_VERSION, SearchProvider } from "./providers";
 import { CrispSearchSettingTab } from "./settings-tab";
 import { SortOrder, isSortOrder } from "./sort";
 import { UsageStore, bodyOrder, indexedDbBackend, memoryBackend, openUsageDatabase } from "./usage";
@@ -139,6 +140,22 @@ export default class CrispSearchPlugin extends Plugin {
     return this.licenseController.unsaved;
   }
 
+  // Other plugins' results (Crisp Tempo's tasks, Crisp Pulse's memos); see src/providers.ts.
+  readonly providers = new ProviderRegistry();
+
+  get searchProviderApiVersion(): number {
+    return SEARCH_PROVIDER_API_VERSION;
+  }
+
+  /**
+   * Adds another plugin's items to the panel under their own tab. Returns the function that removes
+   * them again; call it when the registering plugin unloads. Plugins that load before Crisp Search
+   * (or outlive a reload of it) register again on the workspace event "crisp-search:ready".
+   */
+  registerSearchProvider(provider: SearchProvider): () => void {
+    return this.providers.register(provider);
+  }
+
   async onload(): Promise<void> {
     const raw: unknown = await this.loadData();
     await this.protectUnreadableData(raw);
@@ -170,6 +187,8 @@ export default class CrispSearchPlugin extends Plugin {
       void this.licenseController.refreshInBackground().catch((error) => {
         console.debug("Crisp Search background license check failed", error);
       });
+      // Providers that were waiting for Crisp Search (or lost their place when it reloaded) register now.
+      this.app.workspace.trigger("crisp-search:ready");
     });
   }
 

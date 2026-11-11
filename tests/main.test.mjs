@@ -31,7 +31,7 @@ async function setup(options = {}) {
   const files = (options.paths ?? ["a.md", "bad.md", "z.md"]).map((p) => new TFile(p));
   const events = {};
   const app = {
-    workspace: { layoutReady: true, onLayoutReady: (fn) => fn(), on: () => ({}) },
+    workspace: { layoutReady: true, onLayoutReady: (fn) => fn(), on: () => ({}), trigger: (name) => (events.triggered ??= []).push(name) },
     vault: {
       on: (name, fn) => (events[`vault:${name}`] = fn),
       getFiles: () => files,
@@ -415,4 +415,17 @@ test("a usage database that never answers does not stop the bodies", async () =>
   plugin.usageLoaded = new Promise(() => {});
   await plugin.rebuildIndex();
   assert.equal(plugin.ready, true);
+});
+
+// Results from other plugins (0.8.0). Failure modes: a plugin that loaded first never learns Crisp Search
+// is there; the plugin offers no way to tell which provider contract it speaks.
+test("other plugins can register results, and are told when Crisp Search is ready", async () => {
+  const { plugin, events } = await setup();
+  assert.deepEqual(events.triggered, ["crisp-search:ready"]);
+  assert.equal(plugin.searchProviderApiVersion, 1);
+  const off = plugin.registerSearchProvider({ id: "crisp-tempo", label: "任务", list: () => [], open() {} });
+  assert.deepEqual(plugin.providers.list().map((p) => p.id), ["crisp-tempo"]);
+  off();
+  assert.deepEqual(plugin.providers.list(), []);
+  assert.throws(() => plugin.registerSearchProvider({ id: "x" }), /provider/i);
 });

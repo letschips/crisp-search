@@ -27,6 +27,7 @@ import {
   setPluginEnabled,
 } from "./host-entries";
 import { newNoteName } from "./note-name";
+import { ProviderIndex, ProviderMatch, ProviderScope, SearchProvider, loadEntries, providerScope, scopeProvider } from "./providers";
 import { SORT_ORDERS, SortOrder, resultOrder } from "./sort";
 
 const RECENT_LIMIT = 8;
@@ -102,7 +103,23 @@ interface SettingItem {
   match: CommandMatch;
 }
 
-type Item = FileItem | CommandItem | CreateItem | QueryItem | MoreItem | SuggestItem | PluginItem | SettingItem;
+// Something another plugin brought: a Tempo task, a Pulse memo. Choosing it hands the id back to that plugin.
+interface ProviderItem {
+  type: "provider";
+  section: string;
+  provider: SearchProvider;
+  match: ProviderMatch;
+}
+
+type Item = FileItem | CommandItem | CreateItem | QueryItem | MoreItem | SuggestItem | PluginItem | SettingItem | ProviderItem;
+
+// A file tab or a provider's own tab.
+type PanelScope = SearchScope | ProviderScope;
+// Provider results among notes and commands; their own tab shows more.
+const MIXED_PROVIDER_LIMIT = 3;
+const PROVIDER_LIMIT = 100;
+// A provider that has not answered by then is left out of this panel.
+const PROVIDER_TIMEOUT_MS = 2000;
 
 // Plugins and settings pages among other results; the command list shows more.
 const MIXED_HOST_LIMIT = 2;
@@ -173,6 +190,7 @@ function itemKey(item: Item): string {
   if (item.type === "suggest") return `suggest:${item.kind}:${item.value}`;
   if (item.type === "plugin") return `plugin:${pluginKey(item.plugin)}`;
   if (item.type === "setting") return `setting:${item.page.id}`;
+  if (item.type === "provider") return `provider:${item.provider.id}:${item.match.entry.id}`;
   return item.hit ? `hit:${item.file.path}:${item.hit.line}` : `file:${item.file.path}`;
 }
 
@@ -220,7 +238,12 @@ export class LauncherModal extends Modal {
   private scopesEl!: HTMLElement;
   private chipsEl!: HTMLElement;
   // The tab picked for this panel, and the filters shown as chips before the field.
-  private tab: SearchScope = "all";
+  private tab: PanelScope = "all";
+  // Providers registered when the panel opened, and their entries once each has answered.
+  private providerList: SearchProvider[] = [];
+  private providerIndexes = new Map<string, ProviderIndex>();
+  private providerVersion = 0;
+  private closed = false;
   private filters: Filter[] = [];
   // Tag, folder and extension counts for suggestions, gathered once per panel.
   private filterValues: Partial<Record<FilterKind, Map<string, number>>> = {};
@@ -303,11 +326,20 @@ export class LauncherModal extends Modal {
     this.statusEl = bar.createSpan("crisp-search-status");
 
     this.scopesEl = this.modalEl.createDiv({ cls: "crisp-search-scopes", attr: { role: "tablist" } });
-    for (const [scope, label] of SCOPES) {
+    this.providerList = this.plugin.licensed ? this.plugin.providers.list() : [];
+    for (const [scope, label] of this.scopeList()) {
       const tab = this.scopesEl.createDiv({ cls: "crisp-search-scope", text: label, attr: { role: "tab", "data-scope": scope } });
       tab.addEventListener("click", () => {
         this.setScope(scope);
         this.input.focus();
+      });
+    }
+    for (const provider of this.providerList) {
+      void loadEntries(provider, PROVIDER_TIMEOUT_MS).then((entries) => {
+        if (this.closed) return;
+        this.providerIndexes.set(provider.id, new ProviderIndex(entries));
+        this.providerVersion++;
+        this.refreshKeepingSelection();
       });
     }
 
@@ -398,6 +430,7 @@ export class LauncherModal extends Modal {
   }
 
   onClose(): void {
+    this.closed = true;
     this.stopProgress?.();
     if (this.refreshTimer !== null) activeWindow.clearTimeout(this.refreshTimer);
     this.refreshTimer = null;
@@ -484,8 +517,9 @@ export class LauncherModal extends Modal {
     // Tab and ⇧Tab move between the type tabs.
     if (evt.key === "Tab" && !Keymap.isModEvent(evt) && !evt.altKey) {
       evt.preventDefault();
-      const at = SCOPES.findIndex(([scope]) => scope === this.activeScope());
-      this.setScope(SCOPES[(at + (evt.shiftKey ? SCOPES.length - 1 : 1)) % SCOPES.length][0]);
+      const scopes = this.scopeList();
+      const at = scopes.findIndex(([scope]) => scope === this.activeScope());
+      this.setScope(scopes[(at + (evt.shiftKey ? scopes.length - 1 : 1)) % scopes.length][0]);
       return;
     }
     const caret = this.input.selectionStart ?? 0;
@@ -562,8 +596,10 @@ export class LauncherModal extends Modal {
     const key =
       query || filtered || suggestions.length
         ? [commandMode, this.input.value.trim(), this.tab, JSON.stringify(this.filters), this.drill ? itemKey(this.drill.item) : "",
-            this.sortOrder, this.plugin.licensed, this.plugin.engine.version].join("\u0000")
-        : null;
+            this.sortOrder, this.plugin.licensed, this.plugin.engine.version, this.providerVersion].join("\u0000")
+        : scopeProvider(this.tab) !== null
+          ? [this.tab, this.plugin.licensed, this.providerVersion].join("\u0000")
+          : null;
     if (key !== null && key === this.lastSearch) return;
     this.lastSearch = key;
     this.refreshPending = false;
@@ -577,6 +613,7 @@ export class LauncherModal extends Modal {
     this.modalEl.removeClass("is-locked");
     if (this.drill) this.items = this.hitItems(this.drill.item, query);
     else if (commandMode) this.items = [...this.hostItems(query, HOST_LIMIT), ...this.commandItems(query, Infinity)];
+    else if (scopeProvider(this.tab) !== null) this.items = this.providerItems(scopeProvider(this.tab)!, query, PROVIDER_LIMIT);
     else if (suggestions.length) this.items = suggestions;
     else this.items = query || filtered ? this.searchItems(query) : this.recentItems();
     this.selected = 0;
@@ -662,7 +699,8 @@ export class LauncherModal extends Modal {
       const doc = this.filters.length ? engine.doc(path) : undefined;
       return !doc || matchesFilters(doc, this.filters);
     };
-    const scope = this.tab;
+    // Provider tabs never reach the file search; see update().
+    const scope = this.tab as SearchScope;
     const usage = this.plugin.settings.learnUsage && (this.sortOrder === "recent" || this.sortOrder === "relevance")
       ? this.plugin.usage
       : null;
@@ -686,7 +724,9 @@ export class LauncherModal extends Modal {
       else bodies.push({ type: "file", section: "内容", file, result });
     }
     const mixed = scope === "all" && query && !this.filters.length;
-    const commands = mixed ? [...this.commandItems(query, MIXED_COMMAND_LIMIT), ...this.hostItems(query, MIXED_HOST_LIMIT)] : [];
+    const commands = mixed
+      ? [...this.commandItems(query, MIXED_COMMAND_LIMIT), ...this.hostItems(query, MIXED_HOST_LIMIT), ...this.mixedProviderItems(query)]
+      : [];
     const items: Item[] = [...learned, ...titles, ...commands, ...bodies, ...folders];
     if (page.total > page.results.length) {
       const shown = page.results.length;
@@ -723,6 +763,26 @@ export class LauncherModal extends Modal {
       pageIndex: new CommandIndex([...pages.values()].map(({ id, name }) => ({ id, name }))),
     };
     return this.hosts;
+  }
+
+  // The file tabs, then one tab per provider that was registered when the panel opened.
+  private scopeList(): [PanelScope, string][] {
+    return [...SCOPES, ...this.providerList.map((p): [PanelScope, string] => [providerScope(p.id), p.label])];
+  }
+
+  // One provider's entries matching the words; with no words, its own order. Empty until it has answered.
+  private providerItems(id: string, query: string, limit: number): Item[] {
+    const provider = this.providerList.find((p) => p.id === id);
+    const index = this.providerIndexes.get(id);
+    if (!provider || !index) return [];
+    return index.search(query).slice(0, limit).map((match): Item => ({ type: "provider", section: provider.label, provider, match }));
+  }
+
+  // A few from each provider among note results; a provider can opt out with mixed: false.
+  private mixedProviderItems(query: string): Item[] {
+    return this.providerList
+      .filter((provider) => provider.mixed !== false)
+      .flatMap((provider) => this.providerItems(provider.id, query, MIXED_PROVIDER_LIMIT));
   }
 
   // Plugins, then settings pages, matching the words; none for an empty field, which lists commands.
@@ -768,8 +828,11 @@ export class LauncherModal extends Modal {
     if (this.items.every((item) => item.type === "create")) {
       // An emptied hit list keeps its header, so there is still a way back.
       if (this.drill) this.renderSection(this.drill.item.file.basename);
-      if (query || commandMode || this.drill || this.filters.length) {
-        const text = commandMode || this.plugin.ready ? "没有结果" : "正在建立索引…";
+      const providerTab = scopeProvider(this.tab);
+      if (query || commandMode || this.drill || this.filters.length || providerTab !== null) {
+        const text = providerTab !== null
+          ? this.providerIndexes.has(providerTab) ? "没有结果" : "正在读取…"
+          : commandMode || this.plugin.ready ? "没有结果" : "正在建立索引…";
         this.listEl.createDiv({ cls: "crisp-search-empty", text });
       }
       if (this.items.length === 0) return;
@@ -795,6 +858,8 @@ export class LauncherModal extends Modal {
                     ? this.renderPluginRow(item, index)
                     : item.type === "setting"
                       ? this.renderSettingRow(item, index)
+                      : item.type === "provider"
+                        ? this.renderProviderRow(item, index)
             : item.hit
             ? this.renderHitRow(item, item.hit, index)
             : this.renderFileRow(item, index, query);
@@ -869,6 +934,17 @@ export class LauncherModal extends Modal {
     return row;
   }
 
+  private renderProviderRow(item: ProviderItem, index: number): HTMLElement {
+    const { entry, ranges } = item.match;
+    const row = this.createRow(index, entry.icon ?? item.provider.icon ?? "circle-dot");
+    if (entry.done) row.addClass("is-done");
+    const text = row.createDiv("crisp-search-item-text");
+    renderHighlighted(text.createSpan("crisp-search-item-title"), entry.title, ranges);
+    if (entry.subtitle) text.createSpan({ cls: "crisp-search-item-subtitle", text: entry.subtitle });
+    if (entry.accessory) row.createDiv({ cls: "crisp-search-item-accessory", text: entry.accessory });
+    return row;
+  }
+
   private renderSuggestRow(item: SuggestItem, index: number): HTMLElement {
     const row = this.createRow(index, FILTER_ICONS[item.kind]);
     const text = item.kind === "tag" ? `#${item.value}` : item.value;
@@ -929,7 +1005,7 @@ export class LauncherModal extends Modal {
     if (scroll) row.scrollIntoView({ block: "nearest" });
     const type = this.items[index].type;
     const labels: Record<Item["type"], string> = {
-      command: "运行", create: "新建", query: "搜索", file: "打开", more: "查看", suggest: "添加", setting: "打开", plugin: "",
+      command: "运行", create: "新建", query: "搜索", file: "打开", more: "查看", suggest: "添加", setting: "打开", plugin: "", provider: "打开",
     };
     this.primaryLabel?.setText(labels[type] || (this.actionsFor(this.items[index])[0]?.label ?? "打开"));
     this.placeMoreButton(row, this.items[index]);
@@ -981,6 +1057,7 @@ export class LauncherModal extends Modal {
     if (item.type === "suggest") return this.suggestActions as Action[];
     if (item.type === "setting") return [{ label: "打开", icon: "settings", keys: ["↵"], run: () => this.openPage(item.page.id) }];
     if (item.type === "plugin") return this.pluginActions(item) as Action[];
+    if (item.type === "provider") return [{ label: "打开", icon: item.provider.icon ?? "arrow-up-right", keys: ["↵"], run: () => this.openProviderItem(item) }];
     // Inserting needs a note open in an editor behind the panel.
     const fileActions = this.app.workspace.activeEditor?.editor
       ? this.fileActions
@@ -1056,7 +1133,16 @@ export class LauncherModal extends Modal {
     else if (item.type === "suggest") this.applySuggestion(item);
     else if (item.type === "setting") this.openPage(item.page.id);
     else if (item.type === "plugin") this.pluginActions(item)[0]?.run(item);
+    else if (item.type === "provider") this.openProviderItem(item);
     else void this.openFile(item, mode);
+  }
+
+  // The provider opens its own item (a task in Tempo, a memo in Pulse); a failure there is reported, not thrown.
+  private openProviderItem(item: ProviderItem): void {
+    this.close();
+    void Promise.resolve()
+      .then(() => item.provider.open(item.match.entry.id))
+      .catch((error) => new Notice(`无法打开这条${item.provider.label}：${error instanceof Error ? error.message : String(error)}`));
   }
 
   // The sort picked here applies to this panel only; the default lives in the settings.
@@ -1284,11 +1370,11 @@ export class LauncherModal extends Modal {
   }
 
   // The tab shown as current: typing ">" lists commands whichever tab was picked.
-  private activeScope(): SearchScope {
+  private activeScope(): PanelScope {
     return COMMAND_PREFIX.test(this.input.value.trimStart()) ? "commands" : this.tab;
   }
 
-  private setScope(scope: SearchScope): void {
+  private setScope(scope: PanelScope): void {
     // Leaving the command list drops the ">" that put the panel there.
     if (scope !== "commands") this.input.value = this.input.value.trimStart().replace(COMMAND_PREFIX, "");
     this.tab = scope;
