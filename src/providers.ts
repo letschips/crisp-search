@@ -150,6 +150,12 @@ export interface ProviderMatch {
 // Below any title match: the words were found, but only in the text behind the title.
 const TEXT_SCORE = 0.5;
 
+// The few a provider adds to the "全部" tab: open entries only, so finished tasks do not fill the slots
+// when fewer open ones match. The provider's own tab still lists finished entries below the open ones.
+export function mixedMatches(matches: ProviderMatch[], limit: number): ProviderMatch[] {
+  return matches.filter((match) => match.entry.done !== true).slice(0, limit);
+}
+
 export class ProviderIndex {
   private readonly entries: ProviderEntry[];
   private readonly order = new Map<string, number>();

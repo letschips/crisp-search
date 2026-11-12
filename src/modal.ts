@@ -27,7 +27,7 @@ import {
   setPluginEnabled,
 } from "./host-entries";
 import { newNoteName } from "./note-name";
-import { ProviderIndex, ProviderMatch, ProviderScope, SearchProvider, loadEntries, providerScope, scopeProvider } from "./providers";
+import { ProviderIndex, ProviderMatch, ProviderScope, SearchProvider, loadEntries, mixedMatches, providerScope, scopeProvider } from "./providers";
 import { SORT_ORDERS, SortOrder, resultOrder } from "./sort";
 
 const RECENT_LIMIT = 8;
@@ -771,18 +771,20 @@ export class LauncherModal extends Modal {
   }
 
   // One provider's entries matching the words; with no words, its own order. Empty until it has answered.
-  private providerItems(id: string, query: string, limit: number): Item[] {
+  private providerItems(id: string, query: string, limit: number, mixed = false): Item[] {
     const provider = this.providerList.find((p) => p.id === id);
     const index = this.providerIndexes.get(id);
     if (!provider || !index) return [];
-    return index.search(query).slice(0, limit).map((match): Item => ({ type: "provider", section: provider.label, provider, match }));
+    const matches = index.search(query);
+    return (mixed ? mixedMatches(matches, limit) : matches.slice(0, limit))
+      .map((match): Item => ({ type: "provider", section: provider.label, provider, match }));
   }
 
-  // A few from each provider among note results; a provider can opt out with mixed: false.
+  // A few open ones from each provider among note results; a provider can opt out with mixed: false.
   private mixedProviderItems(query: string): Item[] {
     return this.providerList
       .filter((provider) => provider.mixed !== false)
-      .flatMap((provider) => this.providerItems(provider.id, query, MIXED_PROVIDER_LIMIT));
+      .flatMap((provider) => this.providerItems(provider.id, query, MIXED_PROVIDER_LIMIT, true));
   }
 
   // Plugins, then settings pages, matching the words; none for an empty field, which lists commands.

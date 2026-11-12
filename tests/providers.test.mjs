@@ -5,7 +5,8 @@
 // - duplicate or malformed entries reach the list; a huge list is taken whole;
 // - text only in the body of an entry (a memo's second line) cannot be found;
 // - finished tasks rank above open ones (seen live: three done "测试" tasks hid the open "去测试下");
-// - pinyin and initials, which work for notes and commands, do not work here.
+// - pinyin and initials, which work for notes and commands, do not work here;
+// - finished items fill the "全部" tab when fewer than three open ones match (live ANKS: 72 of 89 tasks are done).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
@@ -20,7 +21,7 @@ await esbuild.build({
   entryPoints: [path.join(root, "src/providers.ts")],
   bundle: true, format: "esm", platform: "node", outfile: path.join(outDir, "providers.mjs"), logLevel: "error",
 });
-const { ProviderRegistry, ProviderIndex, cleanEntries, loadEntries, providerScope, scopeProvider, SEARCH_PROVIDER_API_VERSION, MAX_PROVIDER_ENTRIES } =
+const { ProviderRegistry, ProviderIndex, cleanEntries, loadEntries, mixedMatches, providerScope, scopeProvider, SEARCH_PROVIDER_API_VERSION, MAX_PROVIDER_ENTRIES } =
   await import(pathToFileURL(path.join(outDir, "providers.mjs")).href);
 
 const provider = (extra = {}) => ({ id: "crisp-tempo", label: "任务", list: () => [], open() {}, ...extra });
@@ -95,4 +96,18 @@ test("search matches titles like commands do, finds body text, and keeps open wo
   assert.deepEqual(body[0].ranges, [], "a body match highlights nothing in the title");
   assert.deepEqual(index.search("不存在的词"), []);
   assert.deepEqual(index.search("").map((m) => m.entry.id), ["done", "open", "long", "memo", "en"], "an empty query lists in the provider's order");
+});
+
+test("the 全部 tab takes only open entries, at most the limit; their own tab still lists finished ones", () => {
+  const index = new ProviderIndex(cleanEntries([
+    { id: "open", title: "写周报" },
+    { id: "done1", title: "写周报", done: true },
+    { id: "done2", title: "写周报初稿", done: true },
+    { id: "long", title: "准备写周报的材料" },
+  ]));
+  const matches = index.search("写周报");
+  assert.deepEqual(mixedMatches(matches, 3).map((m) => m.entry.id), ["open", "long"], "two open matches do not get topped up with finished ones");
+  assert.deepEqual(mixedMatches(matches, 1).map((m) => m.entry.id), ["open"]);
+  assert.deepEqual(mixedMatches(new ProviderIndex(cleanEntries([{ id: "d", title: "写周报", done: true }])).search("写周报"), 3), []);
+  assert.deepEqual(matches.map((m) => m.entry.id), ["open", "long", "done1", "done2"], "the provider's own tab is unchanged");
 });
