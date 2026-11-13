@@ -145,6 +145,15 @@ export class CrispSearchSettingTab extends PluginSettingTab {
     const plugin = this.plugin;
     new Setting(containerEl).setName("搜索").setHeading();
     new Setting(containerEl)
+      .setName("简约模式")
+      .setDesc("打开时只有一条搜索框，搜索类型收在右边的圆环里；输入内容或按 ↓ 后展开成完整面板。")
+      .addToggle((toggle) =>
+        toggle.setValue(plugin.settings.compactPanel).onChange((value) => {
+          plugin.settings.compactPanel = value;
+          void plugin.saveSettings();
+        }),
+      );
+    new Setting(containerEl)
       .setName("结果排序")
       .setDesc("笔记名命中的结果始终排在正文命中之前，排序只调整各组内部的先后。面板左下角的菜单按钮里可以临时切换。")
       .addDropdown((dropdown) =>

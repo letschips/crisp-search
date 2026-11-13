@@ -93,6 +93,7 @@ test("recent commands load from data.json and are saved most recent first", asyn
     excludedFolders: [],
     recentQueries: [],
     learnUsage: true,
+    compactPanel: false,
   });
 });
 

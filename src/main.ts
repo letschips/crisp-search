@@ -13,7 +13,7 @@ import {
 } from "obsidian";
 import { preserveUnreadableData, verifyDataWrite } from "./data-safety";
 import { SearchDoc, SearchEngine } from "./engine";
-import { CRISP_SEARCH_ICON, CRISP_SEARCH_ICON_SVG, PANEL_MENU_ICON, PANEL_MENU_ICON_SVG } from "./icon";
+import { CRISP_SEARCH_ICON, CRISP_SEARCH_ICON_SVG, PANEL_MENU_ICON, PANEL_MENU_ICON_SVG, SCOPE_ORB_ICON, SCOPE_ORB_ICON_SVG } from "./icon";
 import { discoverVaultCrispLicenses, verifyLicenseCode } from "./license";
 import { ActivationOutcome, LicenseController, LicenseResult } from "./license-controller";
 import { LauncherModal } from "./modal";
@@ -34,6 +34,8 @@ export interface SearchSettings {
   excludedFolders: string[];
   recentQueries: string[];
   learnUsage: boolean;
+  // An empty panel shows only the field and a type button; typing opens the full panel.
+  compactPanel: boolean;
 }
 
 function strings(value: unknown): string[] {
@@ -56,6 +58,7 @@ function normalizeSettings(raw: unknown): SearchSettings {
     excludedFolders: folderList(strings(data.excludedFolders)),
     recentQueries: strings(data.recentQueries).filter(Boolean).slice(0, RECENT_QUERY_LIMIT),
     learnUsage: data.learnUsage !== false,
+    compactPanel: data.compactPanel === true,
   };
 }
 
@@ -166,6 +169,7 @@ export default class CrispSearchPlugin extends Plugin {
 
     addIcon(CRISP_SEARCH_ICON, CRISP_SEARCH_ICON_SVG);
     addIcon(PANEL_MENU_ICON, PANEL_MENU_ICON_SVG);
+    addIcon(SCOPE_ORB_ICON, SCOPE_ORB_ICON_SVG);
     this.settingTab = new CrispSearchSettingTab(this.app, this);
     this.addSettingTab(this.settingTab);
     this.addCommand({ id: "open", name: "打开搜索面板", callback: () => this.openLauncher() });

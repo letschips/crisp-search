@@ -15,7 +15,7 @@ import {
   suggestValues,
 } from "./filters";
 import type CrispSearchPlugin from "./main";
-import { PANEL_MENU_ICON } from "./icon";
+import { PANEL_MENU_ICON, SCOPE_ORB_ICON } from "./icon";
 import {
   PluginEntry,
   SettingPage,
@@ -37,6 +37,12 @@ const MIXED_COMMAND_LIMIT = 4;
 const COMMAND_PREFIX = /^[>》]/;
 let instanceCount = 0;
 const REFRESH_MS = 250;
+// The type cards stay out this long after the pointer leaves, so crossing a gap does not close them.
+const TRAY_CLOSE_MS = 160;
+// Tab in the compact panel shows the cards this long, so the picked type is seen.
+const TRAY_PEEK_MS = 1200;
+// Each card leans a little, like prints fanned out of a box.
+const CARD_TILTS = [-4, 3, -2, 4, -3, 2, -4, 3];
 
 type OpenMode = "current" | "tab" | "split";
 
@@ -261,6 +267,12 @@ export class LauncherModal extends Modal {
   private commands: Map<string, Command> | null = null;
   private commandIndex: CommandIndex | null = null;
   // Plugins and settings pages with their name matchers, read once per panel and again after a switch.
+  // Compact mode: the circle beside the field, its type cards, and whether ↓ asked for the full panel.
+  private orbEl: HTMLElement | null = null;
+  private trayTimer: number | null = null;
+  private trayPinned = false;
+  private expanded = false;
+  private compactShown = false;
   private hosts: { plugins: Map<string, PluginEntry>; pages: Map<string, SettingPage>; pluginIndex: CommandIndex; pageIndex: CommandIndex } | null =
     null;
 
@@ -308,6 +320,9 @@ export class LauncherModal extends Modal {
       spin.style.animationDelay = `${(index - 3) / 3}s`;
       spin.createSpan("crisp-search-atom-ring");
     }
+    // The compact field shows a still magnifier instead: the atom's 3D layers leave stale frames in a
+    // translucent window when no opaque panel sits behind them.
+    setIcon(bar.createSpan({ cls: "crisp-search-bar-icon crisp-search-glass", attr: { "aria-hidden": "true" } }), "search");
     this.chipsEl = bar.createDiv("crisp-search-chips");
     this.idPrefix = `crisp-search-${++instanceCount}`;
     this.input = bar.createEl("input", {
@@ -328,6 +343,8 @@ export class LauncherModal extends Modal {
 
     this.scopesEl = this.modalEl.createDiv({ cls: "crisp-search-scopes", attr: { role: "tablist" } });
     this.providerList = this.plugin.licensed ? this.plugin.providers.list() : [];
+    // Built after the bar so it sits beside it, and after the providers so their types get cards too.
+    if (!Platform.isMobile) this.buildOrb(bar);
     for (const [scope, label] of this.scopeList()) {
       const tab = this.scopesEl.createDiv({ cls: "crisp-search-scope", text: label, attr: { role: "tab", "data-scope": scope } });
       tab.addEventListener("click", () => {
@@ -417,7 +434,8 @@ export class LauncherModal extends Modal {
     this.escapeScope = new Scope(this.scope);
     this.escapeScope.register([], "Escape", (evt) => {
       if (evt.isComposing) return false;
-      if (this.actionsOpen) this.toggleActions(false);
+      if (this.orbEl?.hasClass("is-open")) this.closeTray(true);
+      else if (this.actionsOpen) this.toggleActions(false);
       else if (this.drill) this.leaveHits();
       else this.close();
       return false;
@@ -435,6 +453,8 @@ export class LauncherModal extends Modal {
     this.stopProgress?.();
     if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
     this.refreshTimer = null;
+    if (this.trayTimer !== null) window.clearTimeout(this.trayTimer);
+    this.trayTimer = null;
     if (this.escapeScope) this.app.keymap.popScope(this.escapeScope);
   }
 
@@ -489,6 +509,20 @@ export class LauncherModal extends Modal {
 
   private onKeyDown(evt: KeyboardEvent): void {
     if (evt.isComposing || evt.keyCode === 229) return;
+    if (this.compactShown) {
+      // Nothing is listed yet: ↓ / ↑ open the full panel, Enter and ⌘K have no row to act on.
+      if (evt.key === "ArrowDown" || evt.key === "ArrowUp") {
+        evt.preventDefault();
+        this.expanded = true;
+        this.update();
+        return;
+      }
+      if (evt.key === "Enter" || (evt.key.toLowerCase() === "k" && Keymap.isModEvent(evt))) {
+        evt.preventDefault();
+        return;
+      }
+      if (evt.key === "Tab" && !Keymap.isModEvent(evt) && !evt.altKey) this.peekTray();
+    }
     // Caps Lock turns the key into "K".
     if (evt.key.toLowerCase() === "k" && Keymap.isModEvent(evt)) {
       evt.preventDefault();
@@ -593,6 +627,7 @@ export class LauncherModal extends Modal {
     // A filter token with no matching value is searched as the text it is.
     const query = parsed ? (parsed.pending && !suggestions.length ? typed : parsed.text) : typed;
     this.renderScopes();
+    this.renderCompact();
     const filtered = this.filters.length > 0;
     const key =
       query || filtered || suggestions.length
@@ -1185,6 +1220,15 @@ export class LauncherModal extends Modal {
     menu.addSeparator();
     menu.addItem((menuItem) =>
       menuItem
+        .setTitle("简约模式")
+        .setChecked(this.plugin.settings.compactPanel)
+        .onClick(() => {
+          this.plugin.settings.compactPanel = !this.plugin.settings.compactPanel;
+          void this.plugin.saveSettings();
+        }),
+    );
+    menu.addItem((menuItem) =>
+      menuItem
         .setTitle("插件设置")
         .setIcon("settings")
         .onClick(() => {
@@ -1383,6 +1427,101 @@ export class LauncherModal extends Modal {
     this.tab = scope;
     this.drill = null;
     this.update();
+  }
+
+  // The circle beside the compact field; hovering or clicking it fans out one card per type but "全部".
+  private buildOrb(bar: HTMLElement): void {
+    const wrap = createDiv("crisp-search-orb-wrap");
+    bar.after(wrap);
+    this.orbEl = wrap;
+    const orb = wrap.createDiv({ cls: "crisp-search-orb", attr: { role: "button", "aria-label": "搜索类型", "aria-haspopup": "true" } });
+    setIcon(orb, SCOPE_ORB_ICON);
+    const tray = wrap.createDiv({ cls: "crisp-search-tray", attr: { role: "menu" } });
+    this.scopeList()
+      .filter(([scope]) => scope !== "all")
+      .forEach(([scope, label], index) => {
+        const card = tray.createDiv({ cls: "crisp-search-card", text: label, attr: { role: "menuitemradio", "data-scope": scope } });
+        card.style.setProperty("--crisp-search-card-i", String(index));
+        card.style.setProperty("--crisp-search-card-tilt", `${CARD_TILTS[index % CARD_TILTS.length]}deg`);
+        card.addEventListener("click", () => {
+          // Picking the type already in use goes back to all of them.
+          this.setScope(this.tab === scope ? "all" : scope);
+          this.closeTray(true);
+        });
+      });
+    this.modalEl.addEventListener("animationend", (evt) => {
+      if (evt.target === this.modalEl) this.modalEl.removeClass("is-expanding");
+    });
+    // The field keeps the caret while the circle and cards are used.
+    wrap.addEventListener("mousedown", (evt) => evt.preventDefault());
+    wrap.addEventListener("mouseenter", () => this.openTray());
+    wrap.addEventListener("mouseleave", () => {
+      if (!this.trayPinned) this.closeTray();
+    });
+    orb.addEventListener("click", () => {
+      const pin = !this.trayPinned;
+      if (pin) this.openTray();
+      else this.closeTray(true);
+      this.trayPinned = pin;
+    });
+  }
+
+  private openTray(): void {
+    if (this.trayTimer !== null) window.clearTimeout(this.trayTimer);
+    this.trayTimer = null;
+    this.orbEl?.addClass("is-open");
+  }
+
+  private closeTray(now = false): void {
+    if (this.trayTimer !== null) window.clearTimeout(this.trayTimer);
+    this.trayTimer = null;
+    this.trayPinned = false;
+    if (now) this.orbEl?.removeClass("is-open");
+    else this.trayTimer = window.setTimeout(() => {
+      this.trayTimer = null;
+      this.orbEl?.removeClass("is-open");
+    }, TRAY_CLOSE_MS);
+  }
+
+  // Tab switched the type: show the cards for a moment so the change is seen.
+  private peekTray(): void {
+    if (this.trayPinned) return;
+    this.openTray();
+    this.trayTimer = window.setTimeout(() => {
+      this.trayTimer = null;
+      if (!this.trayPinned && !this.orbEl?.matches(":hover")) this.orbEl?.removeClass("is-open");
+    }, TRAY_PEEK_MS);
+  }
+
+  // Compact while the field is empty: no words, filters or hit list, and ↓ has not asked for the list.
+  private renderCompact(): void {
+    if (!this.orbEl) return;
+    const compact =
+      this.plugin.settings.compactPanel && this.plugin.licensed && !this.expanded && !this.drill && !this.filters.length && !this.input.value.trim();
+    if (compact !== this.compactShown) {
+      this.compactShown = compact;
+      this.modalEl.toggleClass("is-compact", compact);
+      this.input.setAttr("aria-expanded", String(!compact));
+      if (!compact) {
+        this.closeTray(true);
+        // The panel unrolls down from the field.
+        this.modalEl.removeClass("is-expanding");
+        void this.modalEl.offsetWidth;
+        this.modalEl.addClass("is-expanding");
+      }
+    }
+    if (!compact) {
+      this.input.placeholder = "搜索笔记、内容和命令，输入 / 筛选";
+      return;
+    }
+    const label = this.scopeList().find(([scope]) => scope === this.tab)?.[1];
+    this.input.placeholder = this.tab === "all" || !label ? "搜索笔记、内容和命令…" : `搜索${label}…`;
+    this.orbEl.toggleClass("is-filtered", this.tab !== "all");
+    for (const card of Array.from(this.orbEl.querySelectorAll<HTMLElement>(".crisp-search-card"))) {
+      const on = card.dataset.scope === this.tab;
+      card.toggleClass("is-active", on);
+      card.setAttr("aria-checked", String(on));
+    }
   }
 
   private renderScopes(): void {
