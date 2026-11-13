@@ -41,6 +41,7 @@ const REFRESH_MS = 250;
 const TRAY_CLOSE_MS = 160;
 // Tab in the compact panel shows the cards this long, so the picked type is seen.
 const TRAY_PEEK_MS = 1200;
+const UNROLL_MS = 240;
 // Each card leans a little, like prints fanned out of a box.
 const CARD_TILTS = [-4, 3, -2, 4, -3, 2, -4, 3];
 
@@ -1449,9 +1450,6 @@ export class LauncherModal extends Modal {
           this.closeTray(true);
         });
       });
-    this.modalEl.addEventListener("animationend", (evt) => {
-      if (evt.target === this.modalEl) this.modalEl.removeClass("is-expanding");
-    });
     // The field keeps the caret while the circle and cards are used.
     wrap.addEventListener("mousedown", (evt) => evt.preventDefault());
     wrap.addEventListener("mouseenter", () => this.openTray());
@@ -1493,6 +1491,22 @@ export class LauncherModal extends Modal {
     }, TRAY_PEEK_MS);
   }
 
+  // The full panel unrolls down from the field. Run through the Web Animations API, not a CSS animation
+  // class: swapping the panel's animation-name restarts the theme's own modal entrance (Still's still-rise
+  // fades the panel in again), which shows as a flash. The clip reaches past the sides so the shadow stays.
+  private unroll(): void {
+    if (activeWindow.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const radius = getComputedStyle(this.modalEl).getPropertyValue("--crisp-search-radius").trim() || "26px";
+    const bar = this.modalEl.querySelector<HTMLElement>(".crisp-search-bar")?.offsetHeight ?? 66;
+    this.modalEl.animate(
+      [
+        { clipPath: `inset(-64px -64px calc(100% - ${bar}px) -64px round ${radius})` },
+        { clipPath: `inset(-64px -64px -128px -64px round ${radius})` },
+      ],
+      { duration: UNROLL_MS, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)" },
+    );
+  }
+
   // Compact while the field is empty: no words, filters or hit list, and ↓ has not asked for the list.
   private renderCompact(): void {
     if (!this.orbEl) return;
@@ -1504,10 +1518,7 @@ export class LauncherModal extends Modal {
       this.input.setAttr("aria-expanded", String(!compact));
       if (!compact) {
         this.closeTray(true);
-        // The panel unrolls down from the field.
-        this.modalEl.removeClass("is-expanding");
-        void this.modalEl.offsetWidth;
-        this.modalEl.addClass("is-expanding");
+        this.unroll();
       }
     }
     if (!compact) {

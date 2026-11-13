@@ -862,24 +862,9 @@ body .crisp-search-container .modal.crisp-search-panel.is-compact.is-compact.is-
   font-weight: 600;
 }
 
-/* Typing unrolls the panel down from the field. A clip, not a size change, so nothing reflows. */
-
-body .crisp-search-container .modal.crisp-search-panel.is-expanding.is-expanding.is-expanding.is-expanding {
-  animation: crisp-search-unroll 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
-}
-
-@keyframes crisp-search-unroll {
-  from { clip-path: inset(0 0 calc(100% - 66px) 0 round var(--crisp-search-radius)); }
-  to { clip-path: inset(0 0 0 0 round var(--crisp-search-radius)); }
-}
-
 @media (prefers-reduced-motion: reduce) {
   .crisp-search-card,
   .crisp-search-orb-wrap.is-open .crisp-search-card {
     transition: none;
-  }
-
-  body .crisp-search-container .modal.crisp-search-panel.is-expanding.is-expanding.is-expanding.is-expanding {
-    animation: none;
   }
 }
