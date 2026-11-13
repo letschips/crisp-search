@@ -29,6 +29,7 @@ import {
 import { newNoteName } from "./note-name";
 import { ProviderIndex, ProviderMatch, ProviderScope, SearchProvider, loadEntries, mixedMatches, providerScope, scopeProvider } from "./providers";
 import { SORT_ORDERS, SortOrder, resultOrder } from "./sort";
+import { searchText } from "./search-text";
 
 const RECENT_LIMIT = 8;
 // Commands shown among note results; the ">" prefix lists all of them.
@@ -1420,7 +1421,7 @@ export class LauncherModal extends Modal {
   }
 
   private addFilter(filter: Filter): void {
-    const same = (other: Filter) => other.kind === filter.kind && other.value.toLowerCase() === filter.value.toLowerCase();
+    const same = (other: Filter) => other.kind === filter.kind && searchText(other.value) === searchText(filter.value);
     if (!this.filters.some(same)) this.filters.push(filter);
   }
 

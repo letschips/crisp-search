@@ -1,6 +1,7 @@
 import MiniSearch, { SearchOptions } from "minisearch";
 import { pinyin } from "pinyin-pro";
 import { nameCloseness } from "./note-name";
+import { foldAccents, mappedSearchText, originalRange, searchText } from "./search-text";
 
 // Han, kana and hangul have no spaces between words, so they are indexed as overlapping bigrams.
 // That needs no dictionary and finds any word inside a sentence.
@@ -15,7 +16,7 @@ export function isCjk(term: string): boolean {
 
 export function tokenizeText(text: string): string[] {
   const tokens: string[] = [];
-  for (const match of text.matchAll(TOKEN_RE)) {
+  for (const match of searchText(text).matchAll(TOKEN_RE)) {
     const cjk = match[1];
     if (cjk) {
       for (let i = 0; i + 1 < cjk.length; i++) tokens.push(cjk.slice(i, i + 2));
@@ -113,7 +114,7 @@ const TITLE_FIELDS = new Set(["basename", "aliases", "pinyin", "folder"]);
 const FRONTMATTER_RE = /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/;
 
 function queryParts(query: string): string[] {
-  return query
+  return searchText(query)
     .trim()
     .split(/\s+/)
     .filter((part) => tokenizeText(part).length > 0);
@@ -188,13 +189,14 @@ function prepareParts(parts: string[], matchedTerms: string[]): PreparedPart[] {
 }
 
 function findPreparedRanges(text: string, parts: PreparedPart[]): [number, number][] {
-  const lower = text.toLowerCase();
+  const mapped = mappedSearchText(text);
+  const lower = mapped.text;
   const ranges: [number, number][] = [];
   for (const part of parts) {
     for (const needles of part.levels) {
       const before = ranges.length;
       for (const needle of needles) {
-        for (const at of occurrences(lower, needle)) ranges.push([at, at + needle.length]);
+        for (const at of occurrences(lower, needle)) ranges.push(originalRange(mapped, at, at + needle.length));
       }
       if (ranges.length > before) break;
     }
@@ -250,7 +252,7 @@ export function highlightSegments(text: string, ranges: [number, number][]): { t
 
 // Links collapse to their display text, unless the hidden target is what matched: then it stays visible.
 function cleanMarkdown(text: string, needles: string[]): string {
-  const matched = (hidden: string) => needles.some((needle) => hidden.toLowerCase().includes(needle));
+  const matched = (hidden: string) => needles.some((needle) => searchText(hidden).includes(needle));
   return text
     .replace(/!?\[\[([^\]|]*)(?:\|([^\]]*))?\]\]/g, (_, target: string, alias?: string) =>
       alias === undefined ? target : matched(target) ? `${alias}（${target}）` : alias,
@@ -282,7 +284,7 @@ function hitStarts(body: string, parts: string[], matchedTerms: string[], limit:
   const prepared = prepareParts(parts, matchedTerms);
   let offset = 0;
   for (const line of body.split("\n")) {
-    const lower = line.toLowerCase();
+    const lower = searchText(line);
     if (lower.trim() && prepared.every((part) => lineHolds(lower, part))) {
       starts.push(offset + (findPreparedRanges(line, prepared)[0]?.[0] ?? 0));
       if (starts.length >= limit) break;
@@ -381,7 +383,7 @@ const FUZZY_BELOW = 5;
 
 export class SearchEngine {
   private readonly docs = new Map<string, SearchDoc>();
-  private readonly titleKeys = new Map<string, { text: string; name: string; pinyin: string[] }>();
+  private readonly titleKeys = new Map<string, { text: string; name: string; pinyin: string[]; content: string }>();
   private readonly index = new MiniSearch<IndexedDoc>({
     idField: "path",
     fields: Object.keys(BOOST),
@@ -420,8 +422,8 @@ export class SearchEngine {
     const pinyin = [...pinyinKeys(doc.basename), ...doc.aliases.flatMap(pinyinKeys)];
     // The full file name counts as a name too, so "photo.png" finds the image it names.
     const filename = `${doc.basename}.${doc.extension}`;
-    const name = [doc.basename, filename, ...doc.aliases].join("\n").toLowerCase();
-    this.titleKeys.set(doc.path, { text: `${name}\n${folder.toLowerCase()}`, name, pinyin });
+    const name = searchText([doc.basename, filename, ...doc.aliases].join("\n"));
+    this.titleKeys.set(doc.path, { text: `${name}\n${searchText(folder)}`, name, pinyin, content: foldAccents(doc.content) });
     const { frontmatter, body } = splitFrontmatter(doc.content);
     this.index.add({
       path: doc.path,
@@ -497,14 +499,14 @@ export class SearchEngine {
 
   private inTitle(path: string, part: string): boolean {
     const keys = this.titleKeys.get(path);
-    const lower = part.toLowerCase();
+    const lower = searchText(part);
     return !!keys && (keys.text.includes(lower) || keys.pinyin.some((key) => key.startsWith(lower)));
   }
 
   // Answered by the name, file name or aliases, leaving the folder out.
   private inName(path: string, part: string): boolean {
     const keys = this.titleKeys.get(path);
-    const lower = part.toLowerCase();
+    const lower = searchText(part);
     return !!keys && (keys.name.includes(lower) || keys.pinyin.some((key) => key.startsWith(lower)));
   }
 
@@ -581,12 +583,12 @@ export class SearchEngine {
               ? body
               : "folder";
         // Bigram AND also matches scattered characters; a literal phrase is what the user meant.
-        const title = doc.basename.toLowerCase();
+        const title = searchText(doc.basename);
         const phrase = lowerParts.join(" ");
         let score = hit.score;
         if (title === phrase || `${title}.${doc.extension}` === phrase) score *= 3;
         else if (lowerParts.every((p) => title.includes(p))) score *= 2;
-        else if (literals.every((literal) => literal.test(doc.content))) score *= 1.5;
+        else if (literals.every((literal) => literal.test(this.titleKeys.get(doc.path)!.content))) score *= 1.5;
         const result: SearchResult = { path: doc.path, basename: doc.basename, extension: doc.extension, kind, score, terms: hit.terms };
         if (!accept || accept(result)) results.push(result);
       }
@@ -624,7 +626,7 @@ export class SearchEngine {
       const prepared = prepareParts(lineParts, terms);
       const heading =
         result.kind === "heading"
-          ? doc.headings.find((h) => prepared.every((part) => lineHolds(h.text.toLowerCase(), part)))
+          ? doc.headings.find((h) => prepared.every((part) => lineHolds(searchText(h.text), part)))
           : undefined;
       result.line = heading ? heading.line : result.excerpt.line;
     }

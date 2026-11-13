@@ -1,5 +1,6 @@
 import type { Command, MarkdownFileInfo } from "obsidian";
 import { pinyinKeys } from "./engine";
+import { MappedText, mappedSearchText, originalRange, searchText } from "./search-text";
 
 type CommandCallbacks = Pick<Command, "callback" | "checkCallback" | "editorCallback" | "editorCheckCallback">;
 
@@ -31,6 +32,7 @@ interface PreparedCommand extends CommandEntry {
   lower: string;
   initials: string;
   pinyin: string[];
+  mapped: MappedText;
 }
 
 const WORD_BOUNDARY = /[\s:：\-_/（(]/;
@@ -38,16 +40,17 @@ const WORD_BOUNDARY = /[\s:：\-_/（(]/;
 const EXACT_BONUS = 10;
 
 function prepare(entry: CommandEntry): PreparedCommand {
-  const lower = entry.name.toLowerCase();
+  const mapped = mappedSearchText(entry.name);
+  const lower = mapped.text;
   const words = lower.match(/[a-z0-9]+/g) ?? [];
-  return { ...entry, lower, initials: words.map((w) => w[0]).join(""), pinyin: pinyinKeys(entry.name) };
+  return { ...entry, lower, initials: words.map((w) => w[0]).join(""), pinyin: pinyinKeys(entry.name), mapped };
 }
 
 // 3: starts a word, 2: inside a word, 1.5: pinyin or English initials from the start, 1: initials inside.
 function scorePart(command: PreparedCommand, part: string, ranges: [number, number][]): number {
   const at = command.lower.indexOf(part);
   if (at !== -1) {
-    ranges.push([at, at + part.length]);
+    ranges.push(originalRange(command.mapped, at, at + part.length));
     return at === 0 || WORD_BOUNDARY.test(command.lower[at - 1]) ? 3 : 2;
   }
   if (!/^[a-z0-9]+$/.test(part)) return 0;
@@ -73,7 +76,7 @@ export class CommandIndex {
   }
 
   search(query: string, recent: string[] = []): CommandMatch[] {
-    const parts = [...new Set(query.trim().toLowerCase().split(/\s+/).filter(Boolean))];
+    const parts = [...new Set(searchText(query).trim().split(/\s+/).filter(Boolean))];
     const recency = (id: string) => {
       const at = recent.indexOf(id);
       return at === -1 ? 0 : 1 - at / recent.length;

@@ -1,4 +1,5 @@
 import { CommandIndex } from "./commands";
+import { searchText } from "./search-text";
 
 // Results that other plugins bring to the panel: Crisp Tempo's tasks, Crisp Pulse's memos.
 // A provider registers once (plugin.registerSearchProvider); the panel asks it for its entries when it
@@ -166,11 +167,11 @@ export class ProviderIndex {
     this.entries = entries;
     entries.forEach((entry, at) => this.order.set(entry.id, at));
     this.titles = new CommandIndex(entries.map(({ id, title }) => ({ id, name: title })));
-    this.haystacks = entries.map((entry) => `${entry.title}\n${entry.text ?? ""}`.toLowerCase());
+    this.haystacks = entries.map((entry) => searchText(`${entry.title}\n${entry.text ?? ""}`));
   }
 
   search(query: string): ProviderMatch[] {
-    const parts = [...new Set(query.trim().toLowerCase().split(/\s+/).filter(Boolean))];
+    const parts = [...new Set(searchText(query).trim().split(/\s+/).filter(Boolean))];
     if (!parts.length) return this.entries.map((entry) => ({ entry, score: 0, ranges: [] }));
     const matches = new Map<string, ProviderMatch>();
     for (const match of this.titles.search(query)) {

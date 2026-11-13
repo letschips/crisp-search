@@ -1,4 +1,5 @@
 import type { MatchKind } from "./engine";
+import { searchText } from "./search-text";
 
 export type Scope = "all" | "notes" | "content" | "commands" | "attachments";
 
@@ -81,17 +82,17 @@ export interface FilterTarget {
 function folderHolds(path: string, folder: string): boolean {
   const slash = path.lastIndexOf("/");
   const dir = slash === -1 ? "" : path.slice(0, slash);
-  return `/${dir.toLowerCase()}/`.includes(`/${folder.toLowerCase()}/`);
+  return `/${searchText(dir)}/`.includes(`/${searchText(folder)}/`);
 }
 
 // Every filter must hold. Tags match whole or as a parent of a nested tag; folders match a run of whole
 // folder names anywhere in the path.
 export function matchesFilters(doc: FilterTarget, filters: Filter[]): boolean {
   return filters.every((filter) => {
-    const value = filter.value.toLowerCase();
-    if (filter.kind === "tag") return doc.tags.some((tag) => tag.toLowerCase() === value || tag.toLowerCase().startsWith(`${value}/`));
+    const value = searchText(filter.value);
+    if (filter.kind === "tag") return doc.tags.some((tag) => searchText(tag) === value || searchText(tag).startsWith(`${value}/`));
     if (filter.kind === "path") return folderHolds(doc.path, value);
-    return doc.extension.toLowerCase() === value;
+    return searchText(doc.extension) === value;
   });
 }
 
@@ -102,10 +103,10 @@ export function filterLabel(filter: Filter): string {
 
 // Values containing what was typed: those starting with it first, then the most used.
 export function suggestValues(typed: string, counts: Map<string, number>, limit = 30): string[] {
-  const lower = typed.toLowerCase();
+  const lower = searchText(typed);
   return [...counts.entries()]
-    .filter(([value]) => value.toLowerCase().includes(lower))
-    .sort(([a, x], [b, y]) => Number(b.toLowerCase().startsWith(lower)) - Number(a.toLowerCase().startsWith(lower)) || y - x)
+    .filter(([value]) => searchText(value).includes(lower))
+    .sort(([a, x], [b, y]) => Number(searchText(b).startsWith(lower)) - Number(searchText(a).startsWith(lower)) || y - x)
     .slice(0, limit)
     .map(([value]) => value);
 }
