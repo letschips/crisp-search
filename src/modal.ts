@@ -433,7 +433,7 @@ export class LauncherModal extends Modal {
   onClose(): void {
     this.closed = true;
     this.stopProgress?.();
-    if (this.refreshTimer !== null) activeWindow.clearTimeout(this.refreshTimer);
+    if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
     this.refreshTimer = null;
     if (this.escapeScope) this.app.keymap.popScope(this.escapeScope);
   }
@@ -448,7 +448,7 @@ export class LauncherModal extends Modal {
     }
     this.renderStatus();
     if (this.refreshTimer !== null) return;
-    this.refreshTimer = activeWindow.setTimeout(() => {
+    this.refreshTimer = window.setTimeout(() => {
       this.refreshTimer = null;
       // Mid-composition the field holds raw pinyin; compositionend searches with the committed text anyway.
       if (this.composing || !this.input.value.trim() || this.commandMode()) return;
