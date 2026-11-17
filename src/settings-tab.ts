@@ -2,6 +2,7 @@ import { AbstractInputSuggest, App, Notice, PluginSettingTab, Setting, TFolder, 
 import { CRISP_SEARCH_ICON } from "./icon";
 import type CrispSearchPlugin from "./main";
 import { SORT_ORDERS, isSortOrder } from "./sort";
+import { searchEntitled } from "./entitlement";
 
 const AUTHOR_URL = "https://xhslink.cn/m/3MwtKu4822b";
 
@@ -60,7 +61,7 @@ export class CrispSearchSettingTab extends PluginSettingTab {
     const plugin = this.plugin;
     const license = plugin.license;
     const status = new Setting(containerEl).setName("激活状态");
-    if (plugin.licensed) {
+    if (searchEntitled(plugin)) {
       const payload = license.payload;
       const user = payload?.userName || "Crisp 用户";
       const expiry = payload?.expiresAt ? `到期时间：${String(payload.expiresAt).split("T")[0]}` : "永久授权";

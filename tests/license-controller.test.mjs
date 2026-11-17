@@ -35,6 +35,7 @@ function host({ stored = "", answers = {}, discover = async () => [], persistOk 
     calls: [],
     persists: 0,
     changes: 0,
+    persistOk,
   };
   h.controller = new LicenseController({
     verify: async (code, online) => {
@@ -46,8 +47,8 @@ function host({ stored = "", answers = {}, discover = async () => [], persistOk 
     getCode: () => h.stored,
     persistCode: async (code) => {
       h.persists++;
-      if (persistOk) h.stored = code;
-      return persistOk;
+      if (h.persistOk) h.stored = code;
+      return h.persistOk;
     },
     onChange: () => h.changes++,
     now,
@@ -214,7 +215,7 @@ test("an inherited code that fails to save is flagged and can be saved again", a
   assert.equal(h.controller.unsaved, true);
   assert.equal(await h.controller.retrySave(), false);
   assert.equal(h.controller.unsaved, true);
-  h.controller.deps.persistCode = async (code) => ((h.stored = code), true);
+  h.persistOk = true;
   assert.equal(await h.controller.retrySave(), true);
   assert.equal(h.controller.unsaved, false);
   assert.equal(h.stored, "A");
@@ -227,4 +228,12 @@ test("a manual activation that fails to save shares the unsaved flag; clearing r
   assert.equal(h.controller.unsaved, true);
   await h.controller.clear();
   assert.equal(h.controller.unsaved, false);
+});
+
+test("swapping deps on the instance cannot feed the gate a fake result (hardening)", async () => {
+  const h = host({ stored: "A", answers: { A: { local: { valid: false, reason: "bad" } } } });
+  h.controller.deps = { ...h.controller.deps, verify: async () => OK() };
+  h.controller.state = OK();
+  await h.controller.loadLocal();
+  assert.equal(h.controller.licensed, false);
 });

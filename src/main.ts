@@ -16,6 +16,7 @@ import { SearchDoc, SearchEngine } from "./engine";
 import { CRISP_SEARCH_ICON, CRISP_SEARCH_ICON_SVG, PANEL_MENU_ICON, PANEL_MENU_ICON_SVG, SCOPE_ORB_ICON, SCOPE_ORB_ICON_SVG } from "./icon";
 import { discoverVaultCrispLicenses, verifyLicenseCode } from "./license";
 import { ActivationOutcome, LicenseController, LicenseResult } from "./license-controller";
+import { searchEntitled } from "./entitlement";
 import { LauncherModal } from "./modal";
 import { ProviderRegistry, SEARCH_PROVIDER_API_VERSION, SearchProvider } from "./providers";
 import { CrispSearchSettingTab } from "./settings-tab";
@@ -88,6 +89,12 @@ function sliceBreak(): Promise<void> {
   });
 }
 
+// Module-level on purpose: a method could be replaced on the instance and feed the gate a fake result.
+async function checkLicense(code: string, online: boolean): Promise<LicenseResult> {
+  const result = await verifyLicenseCode(code, PLUGIN_ID, online ? undefined : { online: false });
+  return { valid: result.valid, payload: result.payload, reason: result.reason };
+}
+
 export default class CrispSearchPlugin extends Plugin {
   usage: UsageStore | null = null;
   private usageDb: IDBDatabase | null = null;
@@ -114,7 +121,7 @@ export default class CrispSearchPlugin extends Plugin {
   private readonly versions = new Map<string, number>();
   private saving: Promise<boolean> = Promise.resolve(true);
   private readonly licenseController = new LicenseController({
-    verify: (code, online) => this.checkLicense(code, online),
+    verify: checkLicense,
     discover: () => discoverVaultCrispLicenses(this.app, PLUGIN_ID),
     getCode: () => this.settings.licenseCode,
     persistCode: (code) => {
@@ -122,7 +129,7 @@ export default class CrispSearchPlugin extends Plugin {
       return this.saveSettings();
     },
     onChange: () => this.onLicenseChange(),
-  });
+  }, this);
   private progressListeners = new Set<() => void>();
   private unloaded = false;
 
@@ -136,7 +143,7 @@ export default class CrispSearchPlugin extends Plugin {
 
   /** Searching needs an activated licence; the index is only built once one is in place. */
   get licensed(): boolean {
-    return this.licenseController.licensed;
+    return searchEntitled(this) && this.licenseController.licensed;
   }
 
   get licenseUnsaved(): boolean {
@@ -177,7 +184,7 @@ export default class CrispSearchPlugin extends Plugin {
       id: "rebuild-index",
       name: "重建搜索索引",
       callback: () => {
-        if (this.licensed) void this.rebuildIndex();
+        if (searchEntitled(this)) void this.rebuildIndex();
         else new Notice("Crisp Search 需要激活后才能使用");
       },
     });
@@ -256,21 +263,16 @@ export default class CrispSearchPlugin extends Plugin {
     setting?.openTabById(this.manifest.id);
   }
 
-  private async checkLicense(code: string, online: boolean): Promise<LicenseResult> {
-    const result = await verifyLicenseCode(code, PLUGIN_ID, online ? undefined : { online: false });
-    return { valid: result.valid, payload: result.payload, reason: result.reason };
-  }
-
   private onLicenseChange(): void {
     this.settingTab?.display();
-    if (this.licensed) this.startIndexIfLicensed();
+    if (searchEntitled(this)) this.startIndexIfLicensed();
     else if (this.indexStarted) this.stopIndex();
     // An open panel switches between the activation prompt and search.
     this.emitProgress();
   }
 
   private startIndexIfLicensed(): void {
-    if (this.indexStarted || !this.licensed || this.unloaded || !this.app.workspace.layoutReady) return;
+    if (this.indexStarted || !searchEntitled(this) || this.unloaded || !this.app.workspace.layoutReady) return;
     void this.rebuildIndex();
   }
 

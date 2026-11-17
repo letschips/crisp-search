@@ -30,6 +30,7 @@ import { newNoteName } from "./note-name";
 import { ProviderIndex, ProviderMatch, ProviderScope, SearchProvider, loadEntries, mixedMatches, providerScope, scopeProvider } from "./providers";
 import { SORT_ORDERS, SortOrder, resultOrder } from "./sort";
 import { searchText } from "./search-text";
+import { searchEntitled } from "./entitlement";
 
 const RECENT_LIMIT = 8;
 // Commands shown among note results; the ">" prefix lists all of them.
@@ -343,7 +344,7 @@ export class LauncherModal extends Modal {
     this.statusEl = bar.createSpan("crisp-search-status");
 
     this.scopesEl = this.modalEl.createDiv({ cls: "crisp-search-scopes", attr: { role: "tablist" } });
-    this.providerList = this.plugin.licensed ? this.plugin.providers.list() : [];
+    this.providerList = searchEntitled(this.plugin) ? this.plugin.providers.list() : [];
     // Built after the bar so it sits beside it, and after the providers so their types get cards too.
     if (!Platform.isMobile) this.buildOrb(bar);
     for (const [scope, label] of this.scopeList()) {
@@ -462,7 +463,7 @@ export class LauncherModal extends Modal {
   // Index changes refresh file results but keep the selection. Indexing reports every few milliseconds, so
   // refreshes are gathered into one per REFRESH_MS; while the action menu is open the refresh waits for it.
   private onIndexProgress(): void {
-    if (this.lockedShown !== !this.plugin.licensed) {
+    if (this.lockedShown !== !searchEntitled(this.plugin)) {
       this.renderStatus();
       this.update();
       return;
@@ -495,7 +496,7 @@ export class LauncherModal extends Modal {
 
   private renderStatus(): void {
     const { ready, namesReady, indexed, total, failed } = this.plugin;
-    if (!this.plugin.licensed) this.statusEl.setText("");
+    if (!searchEntitled(this.plugin)) this.statusEl.setText("");
     // Names are searchable once the first pass is done; only bodies are still coming.
     else if (!ready) this.statusEl.setText(namesReady ? `正文索引中 ${indexed}/${total}` : "正在读取文件名…");
     else this.statusEl.setText(failed.length ? `${failed.length} 个文件未能索引` : "");
@@ -633,16 +634,16 @@ export class LauncherModal extends Modal {
     const key =
       query || filtered || suggestions.length
         ? [commandMode, this.input.value.trim(), this.tab, JSON.stringify(this.filters), this.drill ? itemKey(this.drill.item) : "",
-            this.sortOrder, this.plugin.licensed, this.plugin.engine.version, this.providerVersion].join("\u0000")
+            this.sortOrder, searchEntitled(this.plugin), this.plugin.engine.version, this.providerVersion].join("\u0000")
         : scopeProvider(this.tab) !== null
-          ? [this.tab, this.plugin.licensed, this.providerVersion].join("\u0000")
+          ? [this.tab, searchEntitled(this.plugin), this.providerVersion].join("\u0000")
           : null;
     if (key !== null && key === this.lastSearch) return;
     this.lastSearch = key;
     this.refreshPending = false;
     this.cutNotice = "";
     this.toggleActions(false);
-    if (!this.plugin.licensed) {
+    if (!searchEntitled(this.plugin)) {
       this.renderLocked();
       return;
     }
@@ -1511,7 +1512,7 @@ export class LauncherModal extends Modal {
   private renderCompact(): void {
     if (!this.orbEl) return;
     const compact =
-      this.plugin.settings.compactPanel && this.plugin.licensed && !this.expanded && !this.drill && !this.filters.length && !this.input.value.trim();
+      this.plugin.settings.compactPanel && searchEntitled(this.plugin) && !this.expanded && !this.drill && !this.filters.length && !this.input.value.trim();
     if (compact !== this.compactShown) {
       this.compactShown = compact;
       this.modalEl.toggleClass("is-compact", compact);

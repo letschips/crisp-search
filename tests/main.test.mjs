@@ -12,7 +12,12 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const stub = path.join(root, "tests/fakes/obsidian.mjs");
 const outDir = mkdtempSync(path.join(tmpdir(), "crisp-search-main-"));
 await esbuild.build({
-  entryPoints: [path.join(root, "src/main.ts")],
+  // Test-only entry: the gate is reachable here, never from the production bundle.
+  stdin: {
+    contents: `export { default } from ${JSON.stringify(path.join(root, "src/main.ts"))};\nexport { applyEntitlement } from ${JSON.stringify(path.join(root, "src/entitlement.ts"))};`,
+    resolveDir: root,
+    loader: "ts",
+  },
   bundle: true,
   format: "esm",
   platform: "node",
@@ -22,7 +27,7 @@ await esbuild.build({
 });
 // onload schedules the licence expiry check on window.
 globalThis.window ??= { setInterval: () => 0, clearInterval() {}, setTimeout, clearTimeout };
-const { default: CrispSearchPlugin } = await import(pathToFileURL(path.join(outDir, "main.mjs")).href);
+const { default: CrispSearchPlugin, applyEntitlement } = await import(pathToFileURL(path.join(outDir, "main.mjs")).href);
 
 async function setup(options = {}) {
   const { fail = () => false, ignored = () => false } = options;
@@ -225,9 +230,20 @@ test("without a licence the vault is not indexed", async () => {
 function setLicensed(plugin, value) {
   // The settings tab redraws on licence changes; the fake host has no settings DOM.
   plugin.settingTab = null;
-  Object.defineProperty(plugin, "licensed", { get: () => value, configurable: true });
+  applyEntitlement(plugin, { valid: value });
   plugin.onLicenseChange();
 }
+
+test("shadowing licensed or forging the controller state does not index (hardening)", async () => {
+  const { plugin } = await setup();
+  plugin.settingTab = null;
+  Object.defineProperty(plugin, "licensed", { get: () => true, configurable: true });
+  plugin.licenseController.state = { valid: true, payload: { expiresAt: "2999-01-01T00:00:00.000Z" } };
+  plugin.onLicenseChange();
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(plugin.engine.size, 0);
+  assert.equal(plugin.ready, false);
+});
 
 test("edits made before activation are not indexed", async () => {
   const { plugin, files, events } = await setup();
