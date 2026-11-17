@@ -237,3 +237,19 @@ test("swapping deps on the instance cannot feed the gate a fake result (hardenin
   await h.controller.loadLocal();
   assert.equal(h.controller.licensed, false);
 });
+
+test("a second controller built for the same owner cannot open that owner's gate", async () => {
+  const owner = {};
+  const real = new LicenseController({
+    verify: async () => ({ valid: false }), discover: async () => [], getCode: () => "",
+    persistCode: async () => true, onChange() {},
+  }, owner);
+  const Fake = real.constructor;
+  const fake = new Fake({
+    verify: async () => OK(), discover: async () => [], getCode: () => "FORGED",
+    persistCode: async () => true, onChange() {},
+  }, owner);
+  await fake.loadLocal();
+  assert.equal(real.licensed, false);
+  assert.equal(fake.licensed, false);
+});

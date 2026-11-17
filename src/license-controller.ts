@@ -3,7 +3,7 @@
 // after a newer action (or after unload) is dropped instead of overwriting it.
 // Access itself is recorded per owner in ./entitlement; `state` only describes it for the UI.
 
-import { applyEntitlement, onEntitlementChange, searchEntitled } from "./entitlement";
+import { applyEntitlement, claimEntitlement, searchEntitled } from "./entitlement";
 
 export interface LicensePayloadLike {
   userName?: string;
@@ -43,7 +43,8 @@ function expiryTime(payload?: LicensePayloadLike): number | null {
 }
 
 // Deps and owner live outside the instance, so swapping a field cannot feed the gate a fake result.
-const INTERNALS = new WeakMap<LicenseController, { deps: LicenseDeps; owner: object }>();
+// owner is null when another controller already reports for it: such a controller grants nothing.
+const INTERNALS = new WeakMap<LicenseController, { deps: LicenseDeps; owner: object | null }>();
 // A function, not a getter: an own property on the instance could shadow a getter.
 function depsOf(controller: LicenseController): LicenseDeps {
   return INTERNALS.get(controller)!.deps;
@@ -57,9 +58,9 @@ export class LicenseController {
   private disposed = false;
 
   constructor(deps: LicenseDeps, owner?: object) {
-    const internals = { deps, owner: owner ?? this };
-    INTERNALS.set(this, internals);
-    onEntitlementChange(internals.owner, () => deps.onChange());
+    const target = owner ?? this;
+    const claimed = claimEntitlement(target, this, () => deps.onChange());
+    INTERNALS.set(this, { deps, owner: claimed ? target : null });
   }
 
   private now(): number {
@@ -69,7 +70,7 @@ export class LicenseController {
   /** Granted through the module gate and not past its expiry right now. */
   get licensed(): boolean {
     const internals = INTERNALS.get(this);
-    if (!internals || !searchEntitled(internals.owner) || !this.state.valid) return false;
+    if (!internals?.owner || !searchEntitled(internals.owner) || !this.state.valid) return false;
     const expires = expiryTime(this.state.payload);
     return expires === null || this.now() <= expires;
   }
@@ -169,6 +170,6 @@ export class LicenseController {
     this.state = { valid: result.valid, payload: result.payload, reason: result.reason };
     const internals = INTERNALS.get(this);
     // The owner's listener reports a change itself; only an unchanged gate needs a direct refresh.
-    if (!internals || !applyEntitlement(internals.owner, result)) depsOf(this).onChange();
+    if (!internals?.owner || !applyEntitlement(internals.owner, this, result)) depsOf(this).onChange();
   }
 }

@@ -230,7 +230,7 @@ test("without a licence the vault is not indexed", async () => {
 function setLicensed(plugin, value) {
   // The settings tab redraws on licence changes; the fake host has no settings DOM.
   plugin.settingTab = null;
-  applyEntitlement(plugin, { valid: value });
+  applyEntitlement(plugin, plugin.licenseController, { valid: value });
   plugin.onLicenseChange();
 }
 
