@@ -1,6 +1,6 @@
 {
   "name": "crisp-search",
-  "version": "0.9.4",
+  "version": "0.9.5",
   "description": "Launcher-style search for Obsidian, Chinese first.",
   "main": "main.js",
   "type": "module",

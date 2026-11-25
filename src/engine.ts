@@ -370,10 +370,27 @@ export function makeExcerpts(content: string, query: string, matchedTerms: strin
   return excerpts;
 }
 
+// Every insert scans the first level of MiniSearch's term tree, and bigrams gave it one branch per distinct
+// character (about 4,000 in a real vault), which made indexing twice as slow. Each CJK term is filed under a
+// private-use character naming its block of 128 code points; prefix matching within a term still works.
+// Private-use characters are never tokens themselves, so the bucket cannot collide with note text.
+const BUCKET_BASE = 0xe000;
+const BUCKET_END = BUCKET_BASE + (0x10000 >> 7);
+
+function bucketTerm(term: string): string {
+  return isCjk(term[0] ?? "") ? String.fromCharCode(BUCKET_BASE + (term.charCodeAt(0) >> 7)) + term : term;
+}
+
+function plainTerm(term: string): string {
+  const code = term.charCodeAt(0);
+  return code >= BUCKET_BASE && code < BUCKET_END ? term.slice(1) : term;
+}
+
 const SEARCH_OPTIONS: SearchOptions = {
   boost: BOOST,
   combineWith: "AND",
-  prefix: (term: string) => !isCjk(term) || term.length === 1,
+  // Query terms arrive bucketed, see bucketTerm.
+  prefix: (term: string) => !isCjk(term) || plainTerm(term).length === 1,
   fuzzy: (term: string) => (fuzzyDistance(term) ? FUZZY : 0),
 };
 const EXACT_OPTIONS: SearchOptions = { ...SEARCH_OPTIONS, fuzzy: false };
@@ -388,7 +405,8 @@ export class SearchEngine {
     idField: "path",
     fields: Object.keys(BOOST),
     tokenize: (text, field) => (field === "pinyin" ? text.split(" ").filter(Boolean) : tokenizeText(text)),
-    processTerm: (term) => term,
+    // Also applied to query terms, so both sides carry the same bucket.
+    processTerm: bucketTerm,
     // MiniSearch's vacuum walks the index across timers and breaks when a write lands in between; compact()
     // runs it instead and holds writes back meanwhile.
     autoVacuum: false,
@@ -494,7 +512,7 @@ export class SearchEngine {
       ...this.index.search(parts.join(" "), { ...EXACT_OPTIONS, filter }),
       ...this.index.search(parts.join(" "), { ...SEARCH_OPTIONS, filter }),
     ];
-    return hit ? makeExcerpts(doc.content, this.bodyQuery(path, parts), hit.terms) : [];
+    return hit ? makeExcerpts(doc.content, this.bodyQuery(path, parts), hit.terms.map(plainTerm)) : [];
   }
 
   private inTitle(path: string, part: string): boolean {
@@ -589,7 +607,7 @@ export class SearchEngine {
         if (title === phrase || `${title}.${doc.extension}` === phrase) score *= 3;
         else if (lowerParts.every((p) => title.includes(p))) score *= 2;
         else if (literals.every((literal) => literal.test(this.titleKeys.get(doc.path)!.content))) score *= 1.5;
-        const result: SearchResult = { path: doc.path, basename: doc.basename, extension: doc.extension, kind, score, terms: hit.terms };
+        const result: SearchResult = { path: doc.path, basename: doc.basename, extension: doc.extension, kind, score, terms: hit.terms.map(plainTerm) };
         if (!accept || accept(result)) results.push(result);
       }
       return results;

@@ -51,6 +51,20 @@ test("a single Chinese character matches words that start with it", () => {
   assert.deepEqual(paths(engine.search("插")), ["a.md"]);
 });
 
+// Every insert scans the first level of MiniSearch's term tree; one branch per Chinese character made
+// indexing a real vault twice as slow. Callers still see the terms as written.
+test("Chinese terms share a few hundred first-level branches and come back without the bucket", () => {
+  let text = "";
+  for (let code = 0x4e00; code < 0x4e00 + 3000; code += 2) text += String.fromCharCode(code, code + 1) + " ";
+  const engine = engineWith(doc("a.md", text), doc("b.md", "知识库"));
+  assert.ok(engine.index._index._tree.size < 200, `first level has ${engine.index._index._tree.size} branches`);
+  const [hit] = engine.search("知识");
+  assert.equal(hit.path, "b.md");
+  assert.ok(hit.terms.includes("知识"), hit.terms.join());
+  assert.ok(hit.terms.every((term) => !/[-]/.test(term)), hit.terms.join());
+  assert.deepEqual(paths(engine.search("一")), ["a.md"]);
+});
+
 test("the literal phrase ranks above scattered bigrams", () => {
   const engine = engineWith(doc("scattered.md", "知识很重要。另一个话题是识库存。"), doc("literal.md", "知识库"));
   assert.equal(engine.search("知识库")[0].path, "literal.md");
